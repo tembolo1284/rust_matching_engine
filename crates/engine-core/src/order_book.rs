@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::messages::{InputMessage, NewOrder, OutputMessage};
+use crate::messages::{NewOrder, OutputMessage};
 use crate::order::Order;
 use crate::order_type::OrderType;
 use crate::side::Side;
@@ -114,8 +114,8 @@ impl OrderBook {
 
         // Helper lambda: try to remove from a side (bids or asks).
         fn remove_from_side(
-            side: Side,
-            book_symbol: &str,
+            _side: Side,
+            _book_symbol: &str,
             levels: &mut BTreeMap<u32, VecDeque<Order>>,
             user_id: u32,
             user_order_id: u32,

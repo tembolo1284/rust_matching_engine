@@ -3,7 +3,7 @@ members = [
     "crates/engine-core",
     "crates/engine-protocol",
     "crates/engine-server",
-    "crates/engine-udp-adapter",
+    # "crates/engine-udp-adapter",
 ]
 
 resolver = "2"

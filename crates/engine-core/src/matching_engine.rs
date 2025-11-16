@@ -14,13 +14,13 @@
 use std::collections::HashMap;
 
 use crate::messages::{
-    Ack,
+    // Ack,
     Cancel,
-    CancelAck,
+    // CancelAck,
     InputMessage,
     NewOrder,
     OutputMessage,
-    TopOfBook,
+    // TopOfBook,
     TopOfBookQuery,
 };
 use crate::order_book::OrderBook;
@@ -74,13 +74,15 @@ impl MatchingEngine {
         // Get or create order book for this symbol.
         let symbol = msg.symbol.clone();
         let book = self.get_or_create_order_book(&symbol);
+        
+        let output = {
+           let book = self.get_or_create_order_book(symbol);
+           book.add_order(msg, &symbol)
+        };
 
-        // Track order for future cancels.
-        let key = (msg.user_id, msg.user_order_id);
         self.order_to_symbol.insert(key, symbol);
 
-        // Delegate to the book. It will emit Ack, Trades, and TOB updates.
-        book.add_order(&msg)
+        outputs        
     }
 
     fn process_cancel(&mut self, msg: Cancel) -> Vec<OutputMessage> {
