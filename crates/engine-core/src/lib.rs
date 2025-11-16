@@ -13,6 +13,7 @@ pub mod order;
 pub mod order_book;
 pub mod matching_engine;
 pub mod error;
+pub mod top_of_book;
 
 pub use side::Side;
 pub use order_type::OrderType;

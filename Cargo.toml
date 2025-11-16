@@ -1,8 +1,9 @@
 [workspace]
 members = [
-    "engine-core",
-    "engine-protocol",
-    "engine-server",
+    "crates/engine-core",
+    "crates/engine-protocol",
+    "crates/engine-server",
+    "crates/engine-udp-adapter",
 ]
 
 resolver = "2"

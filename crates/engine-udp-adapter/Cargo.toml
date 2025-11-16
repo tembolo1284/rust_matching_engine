@@ -1,0 +1,10 @@
+[package]
+name = "engine-udp-adapter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+engine-protocol = { path = "../engine-protocol" }
+tokio = { version = "1.36", features = ["full"] }
+

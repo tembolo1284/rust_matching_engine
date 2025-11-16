@@ -13,10 +13,5 @@ engine-protocol = { path = "../engine-protocol" }
 # For logging (optional)
 tracing = "0.1"
 tracing-subscriber = "0.3"
-
-# For anyhow error types (optional)
 anyhow = "1.0"
-
-# For examples
-bytes = "1"
 
