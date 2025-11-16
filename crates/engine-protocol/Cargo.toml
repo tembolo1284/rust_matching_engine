@@ -1,0 +1,12 @@
+[package]
+name = "engine-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Binary + CSV serialization protocol for the matching engine."
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+
+# No async dependencies here — just byte buffers.
+

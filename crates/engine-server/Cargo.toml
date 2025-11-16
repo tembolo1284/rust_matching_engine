@@ -1,0 +1,22 @@
+[package]
+name = "engine-server"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Multi-client TCP server for the Rust matching engine."
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+engine-core = { path = "../engine-core" }
+engine-protocol = { path = "../engine-protocol" }
+
+# For logging (optional)
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# For anyhow error types (optional)
+anyhow = "1.0"
+
+# For examples
+bytes = "1"
+
