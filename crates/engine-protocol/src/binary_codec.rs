@@ -77,6 +77,7 @@
 //! prefix each frame) using these functions for the payload.
 
 use std::convert::TryFrom;
+use std::fmt;
 
 use engine_core::{
     Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, TopOfBook, TopOfBookQuery,
@@ -101,6 +102,22 @@ pub enum ProtocolError {
     /// Invalid side or other semantic issue.
     InvalidField(&'static str),
 }
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProtocolError::Truncated => write!(f, "Buffer truncated"),
+            ProtocolError::UnknownMessageType(t) => write!(f, "Unknown message type: {}", t),
+            ProtocolError::VersionMismatch(v) => {
+                write!(f, "Protocol version mismatch: got {}, expected {}", v, PROTOCOL_VERSION)
+            }
+            ProtocolError::InvalidSymbol => write!(f, "Invalid symbol"),
+            ProtocolError::InvalidField(field) => write!(f, "Invalid field: {}", field),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolError {}
 
 // ============================================================================
 // INPUT: client → server
@@ -569,4 +586,3 @@ fn read_u32_be(bytes: &[u8]) -> u32 {
     let arr: [u8; 4] = bytes[0..4].try_into().expect("slice with incorrect length");
     u32::from_be_bytes(arr)
 }
-
