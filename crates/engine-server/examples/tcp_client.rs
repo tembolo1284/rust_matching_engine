@@ -1,151 +1,128 @@
-// crates/engine-server/examples/tcp_client.rs
-//! Simple interactive TCP client for the matching engine.
-//!
-//! - Reads CSV lines from stdin (same format as the old UDP/CSV interface).
-//! - Uses `engine-protocol` to encode them to binary frames.
-//! - Sends them to the server over TCP.
-//! - Reads binary frames back from the server, decodes them, and
-//!   prints CSV-style output.
-//!
-//! This is your “new netcat” for the Rust server.
+use std::env;
+use std::error::Error;
+use std::io::{self, Write};
+use std::time::Duration;
 
-use std::io::{self, BufRead};
-
-use anyhow::Result;
-use engine_core::OutputMessage;
-use engine_protocol::{
-    csv_codec::{format_output_csv, parse_input_line},
-    decode_output,
-    encode_input,
-};
+use engine_core::InputMessage;
+use engine_protocol::csv_codec::{format_output_csv, parse_input_line};
+use engine_protocol::{decode_output, encode_input};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // ---------------------------------------------------------------------
-    // Connect to the server
-    // ---------------------------------------------------------------------
-    // For now, hard-code the address; you can make this a CLI arg later.
-    let addr = std::env::var("ENGINE_CLIENT_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
-    eprintln!("Connecting to {}", addr);
+async fn main() -> Result<(), Box<dyn Error>> {
+    // Where to connect: env override or default.
+    let addr = env::var("ENGINE_CLIENT_ADDR").unwrap_or_else(|_| "127.0.0.1:9001".to_string());
+
+    println!("Connecting to {}...", addr);
     let mut stream = TcpStream::connect(&addr).await?;
-    eprintln!("Connected.");
+    println!("Connected.");
+    println!("Type CSV commands like:");
+    println!("  N, 1, AAPL, 100, 10, B, 1");
+    println!("  C, 1, 1");
+    println!("  F");
+    println!("  Q, AAPL   (query top-of-book)");
+    println!("Type 'quit' or 'exit' to leave.\n");
 
     let stdin = io::stdin();
-    let mut stdin_lock = stdin.lock();
 
     loop {
-        eprint!(">> ");
-        io::Write::flush(&mut io::stderr())?;
+        // Prompt
+        print!(">> ");
+        io::stdout().flush()?;
 
         let mut line = String::new();
-        let n = stdin_lock.read_line(&mut line)?;
+        let n = stdin.read_line(&mut line)?;
         if n == 0 {
             // EOF
+            println!("\nEOF on stdin, exiting client.");
             break;
         }
 
-        let line = line.trim();
-        if line.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("exit") {
+        if trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("exit") {
+            println!("Exiting client.");
             break;
         }
 
-        // -----------------------------------------------------------------
-        // Parse CSV → InputMessage
-        // -----------------------------------------------------------------
-        let Some(input_msg) = parse_input_line(line) else {
-            eprintln!("Could not parse input line as a valid message.");
-            continue;
+        // Parse CSV into InputMessage
+        let input_msg: InputMessage = match parse_input_line(trimmed) {
+            Some(m) => m,
+            None => {
+                eprintln!("Could not parse line as input message. Check CSV format.");
+                continue;
+            }
         };
 
-        // -----------------------------------------------------------------
-        // Encode to binary, frame with length prefix, send
-        // -----------------------------------------------------------------
+        // Encode to binary frame
         let mut payload = Vec::with_capacity(128);
-        encode_input(&input_msg, &mut payload)?; // `?` works because we return `anyhow::Result`
+        encode_input(&input_msg, &mut payload).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("encode error: {:?}", e))
+        })?;
 
-        let len = (payload.len() as u32).to_be_bytes();
-        stream.write_all(&len).await?;
+        let len = payload.len() as u32;
+        let len_bytes = len.to_be_bytes();
+
+        // Send length + payload
+        stream.write_all(&len_bytes).await?;
         stream.write_all(&payload).await?;
-        stream.flush().await?;
 
-        // -----------------------------------------------------------------
-        // Read responses.
-        //
-        // For simplicity, we read *one* frame and print it; the server may
-        // send multiple events (ACK + TOB, or trades), so we loop until
-        // there is nothing immediately available.
-        // -----------------------------------------------------------------
-        // First frame:
-        if let Some(msg) = read_one_output(&mut stream).await? {
-            print_output(&msg);
-        } else {
-            eprintln!("Server closed connection.");
-            break;
-        }
-
-        // Then, greedily read any immediately-available additional frames.
-        // (Non-blocking-ish: we use a short read_exact with peek.)
+        // Now read back all responses that arrive shortly after.
+        // We'll keep reading frames until a small timeout occurs
+        // with no more data.
         loop {
-            // Peek at the stream: if there is no more data, break.
-            let mut peek_buf = [0u8; 1];
-            match stream.peek(&mut peek_buf).await {
-                Ok(0) => {
-                    // Connection closed.
-                    eprintln!("Server closed connection.");
+            let mut len_buf = [0u8; 4];
+
+            let read_len_res = timeout(Duration::from_millis(100), stream.read_exact(&mut len_buf)).await;
+
+            let () = match read_len_res {
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => {
+                    eprintln!("Read error (len): {:?}", e);
                     return Ok(());
                 }
-                Ok(_) => {
-                    // There is data; read another frame.
-                    if let Some(msg) = read_one_output(&mut stream).await? {
-                        print_output(&msg);
-                    } else {
-                        eprintln!("Server closed connection.");
-                        return Ok(());
-                    }
-                }
                 Err(_) => {
-                    // Treat peek error as "no more immediate data".
+                    // Timed out waiting for next response → assume we're done for this command.
                     break;
                 }
+            };
+
+            let frame_len = u32::from_be_bytes(len_buf) as usize;
+            if frame_len == 0 {
+                continue;
             }
+
+            let mut buf = vec![0u8; frame_len];
+            let read_frame_res =
+                timeout(Duration::from_millis(100), stream.read_exact(&mut buf)).await;
+
+            let () = match read_frame_res {
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => {
+                    eprintln!("Read error (frame): {:?}", e);
+                    return Ok(());
+                }
+                Err(_) => {
+                    eprintln!("Timed out reading frame body.");
+                    break;
+                }
+            };
+
+            // Decode OutputMessage
+            let msg = decode_output(&buf).map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("decode error: {:?}", e))
+            })?;
+
+            // Print as CSV so it matches your old style.
+            let line = format_output_csv(&msg);
+            println!("<< {}", line);
         }
     }
 
     Ok(())
-}
-
-// Read a single length-prefixed frame and decode it into an OutputMessage.
-// Returns Ok(None) if the server closed the connection cleanly.
-async fn read_one_output(stream: &mut TcpStream) -> Result<Option<OutputMessage>> {
-    let mut len_buf = [0u8; 4];
-    if let Err(e) = stream.read_exact(&mut len_buf).await {
-        // If it's EOF, return None; otherwise treat as error.
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            return Ok(None);
-        } else {
-            return Err(e.into());
-        }
-    }
-
-    let frame_len = u32::from_be_bytes(len_buf) as usize;
-    if frame_len == 0 {
-        // Empty frame; skip.
-        return Ok(None);
-    }
-
-    let mut buf = vec![0u8; frame_len];
-    stream.read_exact(&mut buf).await?;
-    let msg = decode_output(&buf)?;
-    Ok(Some(msg))
-}
-
-fn print_output(msg: &OutputMessage) {
-    let line = format_output_csv(msg);
-    println!("<< {}", line);
 }
 

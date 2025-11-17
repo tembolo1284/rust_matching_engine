@@ -111,7 +111,6 @@ pub struct TopOfBookQuery {
 
 /// Acknowledgement of a new order (output).
 ///
-/// Extended vs C++: now includes `symbol`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ack {
     pub user_id: u32,
@@ -121,7 +120,6 @@ pub struct Ack {
 
 /// Acknowledgement of a cancel request (output).
 ///
-/// Extended vs C++: now includes `symbol`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelAck {
     pub user_id: u32,
@@ -131,7 +129,6 @@ pub struct CancelAck {
 
 /// Trade event (output).
 ///
-/// Extended vs C++: now includes `symbol`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trade {
     /// Instrument symbol.
@@ -149,7 +146,6 @@ pub struct Trade {
 
 /// Top-of-book event (output).
 ///
-/// Extended vs C++: now includes `symbol`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopOfBook {
     /// Instrument symbol.

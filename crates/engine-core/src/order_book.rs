@@ -171,13 +171,58 @@ impl OrderBook {
     }
 
     /// Flush/clear the entire order book.
-    pub fn flush(&mut self) {
+    /// - Emit CancelAck for every live order (both sides),
+    /// - Emit TopOfBook eliminated messages for any side that had orders,
+    /// - Then clear all internal state.
+    pub fn flush(&mut self) -> Vec<OutputMessage> {
+        let mut outputs = Vec::new();
+
+        // Cancel acks for all bid orders
+        for (_price, orders) in &self.bids {
+            for order in orders {
+                outputs.push(OutputMessage::cancel_ack(
+                    order.user_id,
+                    order.user_order_id,
+                    self.symbol.clone(),
+                ));
+            }
+        }
+
+        // Cancel acks for all ask orders
+        for (_price, orders) in &self.asks {
+            for order in orders {
+                outputs.push(OutputMessage::cancel_ack(
+                    order.user_id,
+                    order.user_order_id,
+                    self.symbol.clone(),
+                ));
+            }
+        }
+
+        // Top-of-book eliminated messages if either side was non-empty
+        if !self.bids.is_empty() {
+            outputs.push(OutputMessage::top_of_book_eliminated(
+                self.symbol.clone(),
+                Side::Buy,
+            ));
+        }
+        if !self.asks.is_empty() {
+            outputs.push(OutputMessage::top_of_book_eliminated(
+                self.symbol.clone(),
+                Side::Sell,
+            ));
+        }
+
+        // Now clear internal state
         self.bids.clear();
         self.asks.clear();
+        self.order_map.clear();
         self.prev_best_bid_price = 0;
         self.prev_best_bid_qty = 0;
         self.prev_best_ask_price = 0;
         self.prev_best_ask_qty = 0;
+
+        outputs
     }
 
     /// Get best bid price (0 if none).

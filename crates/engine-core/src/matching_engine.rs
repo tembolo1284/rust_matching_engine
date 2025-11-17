@@ -124,12 +124,19 @@ impl MatchingEngine {
     }
 
     fn process_flush(&mut self) -> Vec<OutputMessage> {
-        // Clear all order books and mapping.
+        let mut outputs = Vec::new();
+
+        // For each order book, flush and collect its outputs
+        for (_symbol, book) in self.order_books.iter_mut() {
+            let mut book_outputs = book.flush();
+            outputs.append(&mut book_outputs);
+        }
+
+        // Clear tracking structures
         self.order_books.clear();
         self.order_to_symbol.clear();
 
-        // No output messages for flush (same as C++).
-        Vec::new()
+        outputs
     }
 
     /// Process a query for current top-of-book for a given symbol.

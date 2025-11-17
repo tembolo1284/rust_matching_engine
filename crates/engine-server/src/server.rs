@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::types::{
-    ClientId, ClientRegistry, EngineRequest, EngineRx, EngineTx, OutboundRx, OutboundTx,
+    ClientId, ClientRegistry, EngineRx, EngineTx, OutboundRx, OutboundTx,
 };
 
 /// Global-ish counter for assigning unique `ClientId`s.
