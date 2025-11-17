@@ -216,7 +216,6 @@ impl OrderBook {
         // Now clear internal state
         self.bids.clear();
         self.asks.clear();
-        self.order_map.clear();
         self.prev_best_bid_price = 0;
         self.prev_best_bid_qty = 0;
         self.prev_best_ask_price = 0;

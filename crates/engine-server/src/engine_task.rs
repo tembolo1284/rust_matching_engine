@@ -8,7 +8,7 @@
 
 use engine_core::{MatchingEngine, OutputMessage};
 
-use crate::types::{ClientRegistry, EngineRequest, EngineRx};
+use crate::types::{ClientRegistry, EngineRx};
 
 /// Main engine loop.
 ///
