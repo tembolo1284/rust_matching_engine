@@ -1,11 +1,19 @@
 //! Configuration for the engine TCP server.
 //!
-//! For now this is intentionally simple: you can either use defaults
-//! or override via a few environment variables:
+//! You can configure the server either via environment variables
+//! or a simple CLI flag:
 //!
+//! Environment variables (all optional):
 //! - `ENGINE_BIND_ADDR`   (default: "0.0.0.0")
 //! - `ENGINE_PORT`        (default: "9000")
 //! - `ENGINE_MAX_CLIENTS` (default: "1024")
+//!
+//! CLI override (takes precedence over env):
+//! - `--addr HOST:PORT`
+//!
+//! Examples:
+//!   cargo run -p engine-server
+//!   cargo run -p engine-server -- --addr 127.0.0.1:7001
 
 use std::env;
 use std::str::FromStr;
@@ -38,6 +46,39 @@ impl Config {
         })
     }
 
+    /// Construct a `Config` from env + CLI args.
+    ///
+    /// CLI overrides env where provided. Currently supports:
+    ///   --addr HOST:PORT
+    pub fn from_env_and_args() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cfg = Self::from_env()?;
+
+        let mut args = env::args().skip(1); // skip program name
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--addr" => {
+                    let val = args.next().ok_or_else(|| {
+                        "Missing value for --addr (expected HOST:PORT)".to_string()
+                    })?;
+
+                    let parts: Vec<_> = val.split(':').collect();
+                    if parts.len() != 2 {
+                        return Err(format!("Invalid --addr '{}', expected HOST:PORT", val).into());
+                    }
+
+                    cfg.bind_addr = parts[0].to_string();
+                    cfg.port = parts[1]
+                        .parse::<u16>()
+                        .map_err(|e| format!("Invalid port in --addr '{}': {}", val, e))?;
+                }
+                // Ignore unknown args for now (lets you extend later).
+                _ => {}
+            }
+        }
+
+        Ok(cfg)
+    }
+
     /// Convenience: `addr:port` socket string.
     pub fn socket_addr_string(&self) -> String {
         format!("{}:{}", self.bind_addr, self.port)
@@ -54,4 +95,3 @@ where
         Err(_) => Ok(default),
     }
 }
-

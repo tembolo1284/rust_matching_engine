@@ -5,15 +5,9 @@ use engine_server::server;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_env()?;
+    // Read config from env + CLI. CLI (e.g. --addr 127.0.0.1:7001) wins.
+    let config = Config::from_env_and_args()?;
 
-    eprintln!(
-        "Starting engine-server on {}:{} (max_clients = {})",
-        config.bind_addr,
-        config.port,
-        config.max_clients
-    );
-
+    // All the pretty banner / retry logic lives inside server::run.
     server::run(config).await
 }
-
