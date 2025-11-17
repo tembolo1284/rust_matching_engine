@@ -504,7 +504,6 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     let price = read_u32_be(&buf[offset..offset + 4]);
     offset += 4;
     let quantity = read_u32_be(&buf[offset..offset + 4]);
-    offset += 4;
 
     Ok(OutputMessage::Trade(Trade {
         symbol,
@@ -552,7 +551,6 @@ fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     let price = read_u32_be(&buf[offset..offset + 4]);
     offset += 4;
     let total_quantity = read_u32_be(&buf[offset..offset + 4]);
-    offset += 4;
 
     Ok(OutputMessage::TopOfBook(TopOfBook {
         symbol,

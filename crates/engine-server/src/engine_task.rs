@@ -10,10 +10,7 @@
 //! This keeps the engine logic decoupled from who is listening;
 //! symbol-based subscriptions can be added here later if needed.
 
-use std::sync::Arc;
-
 use engine_core::{MatchingEngine, OutputMessage};
-use tokio::sync::RwLock;
 
 use crate::types::{ClientId, ClientRegistry, EngineRequest, EngineRx};
 

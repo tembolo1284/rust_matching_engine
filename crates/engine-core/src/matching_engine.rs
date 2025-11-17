@@ -59,7 +59,7 @@ impl MatchingEngine {
     /// plus the new `QueryTopOfBook` support.
     pub fn process_message(&mut self, msg: InputMessage) -> Vec<OutputMessage> {
         match msg {
-            InputMessage::NewOrder(new) => self.process_new_order(new),
+            InputMessage::NewOrder(new) => self.process_new_order(&new),
             InputMessage::Cancel(cancel) => self.process_cancel(cancel),
             InputMessage::Flush => self.process_flush(),
             InputMessage::QueryTopOfBook(query) => self.process_query_top_of_book(query),
@@ -70,20 +70,22 @@ impl MatchingEngine {
     // Internal handlers
     // -------------------------------------------------------------------------
 
-    fn process_new_order(&mut self, msg: NewOrder) -> Vec<OutputMessage> {
-        // Get or create order book for this symbol.
+    pub fn process_new_order(&mut self, msg: &NewOrder) -> Vec<OutputMessage> {
         let symbol = msg.symbol.clone();
-        let book = self.get_or_create_order_book(&symbol);
-        
-        let output = {
-           let book = self.get_or_create_order_book(symbol);
-           book.add_order(msg, &symbol)
+        // Your order_to_symbol map is keyed by (u32, u32), so:
+        let key = (msg.user_id, msg.user_order_id);
+
+        // Limit the &mut self borrow (via book) to this block:
+        let outputs = {
+            let book = self.get_or_create_order_book(&symbol);
+            book.add_order(msg)
         };
 
+        // Now the book borrow is over, so it's safe to mutate self.order_to_symbol
         self.order_to_symbol.insert(key, symbol);
 
-        outputs        
-    }
+        outputs
+    }    
 
     fn process_cancel(&mut self, msg: Cancel) -> Vec<OutputMessage> {
         let key = (msg.user_id, msg.user_order_id);
@@ -203,5 +205,6 @@ impl MatchingEngine {
     pub fn num_symbols(&self) -> usize {
         self.order_books.len()
     }
+
 }
 

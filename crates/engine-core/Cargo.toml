@@ -9,4 +9,7 @@ description = "Pure matching engine core: order book, matching engine, messages.
 # Used for timestamps
 tokio = { version = "1.36", features = ["macros", "rt", "time"] }
 
+[dev-dependencies]
+engine-protocol = { path = "../engine-protocol" }
+
 # This needs to be pure logic, and no networking, no protocol dependencies.

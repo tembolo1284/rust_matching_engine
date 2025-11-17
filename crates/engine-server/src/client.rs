@@ -1,3 +1,5 @@
+// crates/engine-server/src/client.rs
+
 //! Per-client TCP handler.
 //!
 //! Responsibilities:
@@ -8,15 +10,11 @@
 //!   write them back as length-prefixed binary frames.
 
 use std::error::Error;
-use std::sync::Arc;
 
 use engine_core::OutputMessage;
 use engine_protocol::{decode_input, encode_output};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::select;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
+use tokio::net::{tcp::OwnedWriteHalf, TcpStream};
 
 use crate::types::{ClientId, ClientRegistry, EngineRequest, EngineTx, OutboundRx};
 
@@ -29,22 +27,28 @@ use crate::types::{ClientId, ClientRegistry, EngineRequest, EngineTx, OutboundRx
 /// - `clients`: shared registry to allow removal on disconnect.
 pub async fn run_client(
     client_id: ClientId,
-    mut stream: TcpStream,
+    stream: TcpStream,
     engine_tx: EngineTx,
     mut out_rx: OutboundRx,
     clients: ClientRegistry,
 ) -> Result<(), Box<dyn Error>> {
     let peer_addr = stream.peer_addr().ok();
 
-    // Split stream into read/write halves if needed; here we just clone the stream for simplicity.
-    let mut read_stream = stream.try_clone()?;
-    let mut write_stream = stream;
+    // Split into owned read/write halves so we can read in this task
+    // and write from a spawned writer task concurrently.
+    let (mut read_stream, write_stream) = stream.into_split();
 
     // Writer task: consume `OutputMessage`s and write frames.
     let writer_handle = tokio::spawn(async move {
+        let mut write_stream = write_stream;
+
         while let Some(msg) = out_rx.recv().await {
             if let Err(e) = write_message(&mut write_stream, &msg).await {
-                eprintln!("Client {} write error: {:?}", client_id.0, e);
+                eprintln!(
+                    "Client {} write error: {:?}",
+                    client_id.0,
+                    e
+                );
                 break;
             }
         }
@@ -62,6 +66,7 @@ pub async fn run_client(
             );
             break;
         }
+
         let frame_len = u32::from_be_bytes(len_buf) as usize;
         if frame_len == 0 {
             // Ignore empty frames (or treat as protocol error if you prefer).
@@ -85,12 +90,18 @@ pub async fn run_client(
                     msg: input_msg,
                 };
                 if engine_tx.send(req).is_err() {
-                    eprintln!("Engine channel closed, shutting down client {}", client_id.0);
+                    eprintln!(
+                        "Engine channel closed, shutting down client {}",
+                        client_id.0
+                    );
                     break;
                 }
             }
             Err(err) => {
-                eprintln!("Client {} protocol decode error: {:?}", client_id.0, err);
+                eprintln!(
+                    "Client {} protocol decode error: {:?}",
+                    client_id.0, err
+                );
                 // You can choose to drop the connection or just ignore this frame.
                 break;
             }
@@ -111,11 +122,17 @@ pub async fn run_client(
 }
 
 async fn write_message(
-    stream: &mut TcpStream,
+    stream: &mut OwnedWriteHalf,
     msg: &OutputMessage,
 ) -> Result<(), Box<dyn Error>> {
     let mut payload = Vec::with_capacity(128);
-    encode_output(msg, &mut payload)?;
+
+    // encode_output returns Result<_, ProtocolError>, which does not implement Error.
+    // Map it manually into a Box<dyn Error>.
+    if let Err(e) = encode_output(msg, &mut payload) {
+        let s = format!("protocol encode error: {:?}", e);
+        return Err(Box::<dyn Error>::from(s));
+    }
 
     let len = payload.len() as u32;
     let len_bytes = len.to_be_bytes();

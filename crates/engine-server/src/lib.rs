@@ -1,13 +1,12 @@
 //! engine-server
 //!
-//! Multi-client async TCP server for the Rust matching engine.
-//!
-//! This crate glues together:
-//! - `engine-core`
-//! - `engine-protocol`
-//! and exposes a `server::run(Config)` entrypoint.
+//! Multi-client async TCP server for the matching engine.
 
 pub mod config;
 pub mod types;
 pub mod server;
+
+// these are internal modules, not re-exported
+mod client;
+mod engine_task;
 

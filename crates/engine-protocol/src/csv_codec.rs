@@ -1,3 +1,5 @@
+// crates/engine-protocol/src/csv_codec.rs
+
 //! CSV compatibility codec.
 //!
 //! This mirrors (and slightly extends) your original C++ CSV parser
@@ -17,7 +19,7 @@
 //! - Query top-of-book (NEW):
 //!   `Q, symbol(string)`
 //!
-//! Output format (`OutputMessage` → line):
+//! Output format (`OutputMessage` → line) - NEW FORMAT:
 //!
 //! - Ack:
 //!   `A, userId, userOrderId, symbol`
@@ -36,9 +38,7 @@
 
 use std::num::ParseIntError;
 
-use engine_core::{
-    Cancel, InputMessage, NewOrder, OutputMessage, Side, TopOfBook, TopOfBookQuery, Trade,
-};
+use engine_core::{Cancel, InputMessage, NewOrder, OutputMessage, Side, TopOfBookQuery};
 
 /// Parse a single CSV line into an `InputMessage`.
 ///
@@ -130,7 +130,7 @@ fn parse_query_tob(tokens: &[String]) -> Option<InputMessage> {
     Some(InputMessage::QueryTopOfBook(TopOfBookQuery { symbol }))
 }
 
-/// Format an `OutputMessage` as a CSV line.
+/// Format an `OutputMessage` as a CSV line (NEW, symbol-aware format).
 pub fn format_output_csv(msg: &OutputMessage) -> String {
     match msg {
         OutputMessage::Ack(a) => format!("A, {}, {}, {}", a.user_id, a.user_order_id, a.symbol),
@@ -159,6 +159,41 @@ pub fn format_output_csv(msg: &OutputMessage) -> String {
                     "B, {}, {}, {}, {}",
                     t.symbol, side_char, t.price, t.total_quantity
                 )
+            }
+        }
+    }
+}
+
+/// Legacy formatter matching the original C++ `output_file.csv` format.
+///
+/// Old format:
+/// - Ack:        `A, userId, userOrderId`
+/// - CancelAck:  `C, userId, userOrderId`
+/// - Trade:      `T, userIdBuy, userOrderIdBuy, userIdSell, userOrderIdSell, price, quantity`
+/// - TopOfBook:  `B, side, price, totalQuantity`
+/// - TOB elim:   `B, side, -, -`
+pub fn format_output_legacy(msg: &OutputMessage) -> String {
+    match msg {
+        OutputMessage::Ack(a) => format!("A, {}, {}", a.user_id, a.user_order_id),
+        OutputMessage::CancelAck(c) => format!("C, {}, {}", c.user_id, c.user_order_id),
+        OutputMessage::Trade(t) => format!(
+            "T, {}, {}, {}, {}, {}, {}",
+            t.user_id_buy,
+            t.user_order_id_buy,
+            t.user_id_sell,
+            t.user_order_id_sell,
+            t.price,
+            t.quantity
+        ),
+        OutputMessage::TopOfBook(t) => {
+            let side_char = match t.side {
+                Side::Buy => 'B',
+                Side::Sell => 'S',
+            };
+            if t.eliminated {
+                format!("B, {}, -, -", side_char)
+            } else {
+                format!("B, {}, {}, {}", side_char, t.price, t.total_quantity)
             }
         }
     }

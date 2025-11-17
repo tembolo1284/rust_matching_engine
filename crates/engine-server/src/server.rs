@@ -11,21 +11,21 @@
 //! The actual per-client logic and engine loop live in `client`
 //! and `engine_task` modules respectively.
 
-mod client;
-mod engine_task;
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
-use engine_core::OutputMessage;
+// use engine_core::OutputMessage;
 
 use crate::config::Config;
 use crate::types::{
-    ClientId, ClientRegistry, EngineRequest, EngineRx, EngineTx, OutboundRx, OutboundTx,
+    ClientId, ClientRegistry, EngineRx, EngineTx, OutboundRx, OutboundTx,
 };
+
+use crate::client;
+use crate::engine_task;
 
 /// Global-ish counter for assigning unique `ClientId`s.
 ///
