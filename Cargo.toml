@@ -3,6 +3,7 @@ members = [
     "crates/engine-core",
     "crates/engine-protocol",
     "crates/engine-server",
+    "crates/engine-trading-client",
     # "crates/engine-udp-adapter",
 ]
 

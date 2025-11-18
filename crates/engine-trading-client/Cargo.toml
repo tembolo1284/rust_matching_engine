@@ -1,0 +1,47 @@
+# crates/engine-trading-client/Cargo.toml
+[package]
+name = "engine-trading-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies
+engine-core = { path = "../engine-core" }
+engine-protocol = { path = "../engine-protocol" }
+
+# TUI framework
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Networking
+bytes = "1.5"
+
+# Data structures
+dashmap = "5.5"
+indexmap = "2.1"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling
+chrono = "0.4"
+
+# CLI args
+clap = { version = "4", features = ["derive"] }
+
+# Optional clipboard support
+copypasta = "0.10"
