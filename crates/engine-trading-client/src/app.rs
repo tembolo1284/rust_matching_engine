@@ -4,6 +4,7 @@ use chrono::{DateTime, Local};
 use engine_core::{OutputMessage, Side};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub enum InputMode {
     Normal,
@@ -99,7 +100,7 @@ pub struct App {
     // Order ID counter
     pub next_order_id: u32,
 
-    pub network_tx: Option<UnboundedSender,InputMessage>>,
+    pub network_tx: Option<UnboundedSender<InputMessage>>,
 }
 
 #[derive(Default, Clone)]
@@ -188,7 +189,7 @@ impl App {
     pub fn cancel_selected_order(&mut self) {
         if let Some(order) = self.my_orders.values().nth(self.selected_order_index) {
             let cancel_msg = InputMessage::Cancel(Cancel {
-                user_id: order.user_id,
+                user_id: self.user_id,
                 user_order_id: order.order_id,
             });
             

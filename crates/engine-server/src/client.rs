@@ -19,13 +19,13 @@ pub async fn run_client(
     mut out_rx: OutboundRx,
     clients: ClientRegistry,
 ) -> Result<(), Box<dyn Error>> {
-    let peer_addr = stream.peer_addr().ok();
+    let _peer_addr = stream.peer_addr().ok();
 
     // Split stream
     let (mut read_stream, write_stream) = stream.into_split();
 
     // Writer task: consume OutputMessages and write responses
-    let writer_handle = tokio::spawn(async move {
+    let _writer_handle = tokio::spawn(async move {
         let mut write_stream = write_stream;
 
         while let Some(msg) = out_rx.recv().await {

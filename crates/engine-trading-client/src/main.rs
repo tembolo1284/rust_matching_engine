@@ -19,8 +19,8 @@ use ratatui::{
 };
 use std::{io, time::Duration};
 use tokio::sync::mpsc;
-use tracing::info;
-
+use tracing::{info, error};
+use engine_core::{InputMessage, OutputMessage};
 use crate::app::{App, InputMode};
 use crate::network::EngineConnection;
 
@@ -105,23 +105,7 @@ async fn run_app<B: Backend>(
     // Spawn network handler
     let server_addr_clone = server_addr.to_string();
     let network_handle = tokio::spawn(async move {
-        let mut connection = connection;
-        
-        // Run both the connection reader and the message sender
-        tokio::select! {
-            _ = connection.run() => {
-                // Connection reading task
-            }
-            _ = async {
-                while let Some(msg) = rx_from_app.recv().await {
-                    if let Err(e) = connection.send(msg).await {
-                        error!("Failed to send message: {}", e);
-                    }
-                }
-            } => {
-                // Message sending task
-            }
-        }
+        connection.run(rx_from_app).await;
     });
 
     loop {

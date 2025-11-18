@@ -6,7 +6,7 @@ use engine_core::{InputMessage, OutputMessage};
 use engine_protocol::binary_codec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
