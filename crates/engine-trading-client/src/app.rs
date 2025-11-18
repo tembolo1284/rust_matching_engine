@@ -180,13 +180,15 @@ impl App {
     
     pub fn cancel_selected_order(&mut self) {
         if let Some(order) = self.my_orders.values().nth(self.selected_order_index) {
-            let cancel_msg = Cancel{
+            let cancel = Cancel{
                 user_id: self.user_id,
                 user_order_id: order.order_id,
             };
-            
+
+            let msg = InputMessage::Cancel(cancel);           
+ 
             if let Some(tx) = &self.network_tx {
-                let _ = tx.send(cancel_msg);
+                let _ = tx.send(msg);
             }
         }
     }
