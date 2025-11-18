@@ -203,4 +203,125 @@ Outputs generated: 71
 Goodbye!
 
 
+## Trading Terminal Client
 
+A professional-grade terminal UI for interacting with the matching engine, providing real-time order book visualization, order management, and trade execution capabilities.
+
+### Features
+
+- **Real-time Order Book Display** - Live bid/ask depth visualization
+- **Order Management** - Place, track, and cancel orders
+- **Trade Blotter** - View recent executions with timestamps
+- **Position Tracking** - Monitor open positions and P&L
+- **Multi-Protocol Support** - Binary protocol for low latency, CSV for compatibility
+- **Keyboard-Driven Interface** - Fast hotkey trading for professionals
+
+### Installation & Launch
+
+#### Prerequisites
+- Rust toolchain (1.70+)
+- Running matching engine server
+
+#### Starting the Trading Terminal
+
+1. **Start the matching engine server** (in terminal 1):
+```bash
+cargo run -p engine-server
+# Server will start on port 9001 by default
+```
+
+2. **Launch the trading client** (in terminal 2):
+```bash
+# Basic launch with defaults
+cargo run -p engine-trading-client
+
+# With custom parameters
+cargo run -p engine-trading-client -- --server 127.0.0.1:9001 --user-id 1 --symbol AAPL
+
+# Enable debug logging
+cargo run -p engine-trading-client -- --debug
+
+# View help
+cargo run -p engine-trading-client -- --help
+```
+
+### Terminal UI Layout
+```
+┌──────────────────────────────────────────────────────────┐
+│ AAPL - Connected ✓    Trades: 5 | Volume: 1.2K | Msgs: 42│
+├─────────────────────┬──────────────┬────────────────────┤
+│    ORDER BOOK       │  MY ORDERS   │   RECENT TRADES    │
+│  BIDS      ASKS     │              │                    │
+│  100@105 | 50@106   │ #1234 B 100  │ 10:32:15 AAPL Buy  │
+│  200@104 | 100@107  │   @105 OPEN  │   100@105          │
+│                     │              │                    │
+│                     │              ├────────────────────┤
+│                     │              │    POSITIONS       │
+│                     │              │ AAPL +100 @105     │
+│                     │              │  P&L: +$50         │
+└─────────────────────┴──────────────┴────────────────────┘
+│ [B]uy [S]ell [C]ancel [X]Cancel All [Q]uit              │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Keyboard Shortcuts
+
+#### Trading Actions
+- `B` / `b` - Place Buy Order
+- `S` / `s` - Place Sell Order  
+- `M` / `m` - Toggle Market/Limit Order
+- `C` / `c` - Cancel Selected Order
+- `X` / `x` - Cancel All Orders
+
+#### Navigation
+- `Tab` - Next Panel
+- `Shift+Tab` - Previous Panel
+- `↑` / `k` - Move Selection Up
+- `↓` / `j` - Move Selection Down
+- `←` / `h` - Move Selection Left
+- `→` / `l` - Move Selection Right
+
+#### View Controls
+- `F1` - Toggle Help Menu
+- `F2` - Toggle Chart View (future)
+- `F3` - Toggle Market Depth
+- `/` - Search Symbol
+- `Q` / `q` - Quit
+
+### Order Entry Workflow
+
+1. Press `B` (buy) or `S` (sell) to start order entry
+2. Toggle between Market/Limit with `M`
+3. For Limit orders: Enter price
+4. Enter quantity
+5. Press `Enter` to submit order
+6. Press `Esc` to cancel entry
+
+### Testing the System
+
+You can test order matching by:
+
+1. **Using the UI**: Place buy and sell orders at the same price
+2. **Using netcat** (in another terminal):
+```bash
+# Send a buy order
+echo "N, 1, AAPL, 10000, 100, B, 1" | nc localhost 9001
+
+# Send a matching sell order  
+echo "N, 2, AAPL, 10000, 100, S, 2" | nc localhost 9001
+```
+
+### Configuration
+
+Default settings can be modified via command-line arguments:
+- `--server` - Server address (default: 127.0.0.1:9001)
+- `--user-id` - Your trader ID (default: 1)
+- `--symbol` - Initial symbol to trade (default: AAPL)
+- `--debug` - Enable debug logging
+
+### Troubleshooting
+
+- **Connection Failed**: Ensure the server is running before starting the client
+- **UI Rendering Issues**: Terminal should be at least 80x24 characters
+- **Orders Not Appearing**: Check server logs for processing errors
+- **Slow Response**: Binary protocol is faster than CSV for production use
