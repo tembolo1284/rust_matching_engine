@@ -19,7 +19,7 @@ use ratatui::{
 };
 use std::{io, time::Duration};
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{info};
 use engine_core::{InputMessage, OutputMessage};
 
 use crate::app::{App, InputMode};

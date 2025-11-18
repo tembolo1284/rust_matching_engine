@@ -1,11 +1,10 @@
 // crates/engine-trading-client/src/app.rs
 
 use chrono::{DateTime, Local};
-use engine_core::{OutputMessage, InputMessage, Side};
+use engine_core::{OutputMessage, InputMessage, Side, NewOrder, Cancel};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
 use tokio::sync::mpsc::UnboundedSender;
-use crate::InputMessage::{Cancel, NewOrder};
 
 pub enum InputMode {
     Normal,
@@ -175,24 +174,16 @@ impl App {
         };
     }
     
-    pub fn start_order_entry(&mut self, side: Side) {
-        self.order_side = Some(side);
-        self.current_panel = Panel::OrderEntry;
-        self.input_mode = InputMode::Editing;
-        self.input_buffer.clear();
-        self.input_cursor = 0;
-    }
-    
     pub fn toggle_market_order(&mut self) {
         self.is_market_order = !self.is_market_order;
     }
     
     pub fn cancel_selected_order(&mut self) {
         if let Some(order) = self.my_orders.values().nth(self.selected_order_index) {
-            let cancel_msg = InputMessage::Cancel(Cancel {
+            let cancel_msg = Cancel{
                 user_id: self.user_id,
                 user_order_id: order.order_id,
-            });
+            };
             
             if let Some(tx) = &self.network_tx {
                 let _ = tx.send(cancel_msg);
@@ -204,7 +195,16 @@ impl App {
         // Cancel all open orders
         for order in self.my_orders.values() {
             if order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled {
-                // Would send cancel message
+                let cancel = Cancel {
+                    user_id: self.user_id,
+                    user_order_id: order.order_id,
+                };
+                
+                let cancel_msg = InputMessage::Cancel(cancel);
+                
+                if let Some(tx) = &self.network_tx {
+                    let _ = tx.send(cancel_msg);
+                }
             }
         }
     }
@@ -293,20 +293,28 @@ impl App {
             let price = if self.is_market_order {
                 0
             } else {
-                (self.order_price_input.parse::<f64>().unwrap_or(0.0) * 100.0) as u32
+                // Parse from order_price_input or input_buffer depending on your UI flow
+                // For now, let's try to parse from input_buffer if price_input is empty
+                if !self.order_price_input.is_empty() {
+                    (self.order_price_input.parse::<f64>().unwrap_or(0.0) * 100.0) as u32
+                } else {
+                    100 // Default price if not set
+                }
             };
             
             let order_id = self.get_next_order_id();
-            
-            // Create the order
-            let order_msg = InputMessage::NewOrder(NewOrder {
+           
+            let new_order = NewOrder {
                 user_id: self.user_id,
                 user_order_id: order_id,
                 symbol: self.current_symbol.clone(),
                 price,
                 quantity,
                 side: side.clone(),
-            });
+            };
+ 
+            // Create the order
+            let order_msg = InputMessage::NewOrder(new_order);
             
             // Store order locally as pending
             let order = Order {
@@ -317,7 +325,7 @@ impl App {
                 quantity,
                 filled_qty: 0,
                 status: OrderStatus::Pending,
-                timestamp: chrono::Local::now(),
+                timestamp: Local::now(),
             };
             self.my_orders.insert(order_id, order);
             
@@ -336,15 +344,34 @@ impl App {
         }
     }
     
+    // Also update the start_order_entry to properly handle input
+    pub fn start_order_entry(&mut self, side: Side) {
+        self.order_side = Some(side);
+        self.current_panel = Panel::OrderEntry;
+        self.input_mode = InputMode::Editing;
+        self.input_buffer.clear();
+        self.order_price_input.clear();
+        self.order_qty_input.clear();
+        self.input_cursor = 0;
+    }
+    
+    pub fn enter_char(&mut self, c: char) {
+        // Depending on what we're editing, update the appropriate field
+        if matches!(self.current_panel, Panel::OrderEntry) {
+            // You might want to track which field is being edited
+            // For now, let's put everything in input_buffer
+            self.input_buffer.insert(self.input_cursor, c);
+            self.input_cursor += 1;
+        } else {
+            self.input_buffer.insert(self.input_cursor, c);
+            self.input_cursor += 1;
+        }
+    }
+
     pub fn cancel_input(&mut self) {
         self.input_buffer.clear();
         self.input_cursor = 0;
         self.input_mode = InputMode::Normal;
-    }
-    
-    pub fn enter_char(&mut self, c: char) {
-        self.input_buffer.insert(self.input_cursor, c);
-        self.input_cursor += 1;
     }
     
     pub fn delete_char(&mut self) {
