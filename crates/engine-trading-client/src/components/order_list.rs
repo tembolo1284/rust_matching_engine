@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::{App, OrderStatus};
 use engine_core::Side;
 
-pub fn draw_order_list<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec!["ID", "Side", "Price", "Qty", "Filled", "Status"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 

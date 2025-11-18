@@ -10,7 +10,7 @@ use ratatui::{
 use crate::app::{App, InputMode};
 use engine_core::Side;
 
-pub fn draw_order_entry<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_order_entry(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .title(" Order Entry ")
         .borders(Borders::ALL)

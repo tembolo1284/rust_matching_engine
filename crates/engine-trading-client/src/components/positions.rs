@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::app::App;
 
-pub fn draw_positions<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_positions(f: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec!["Symbol", "Qty", "Avg Price", "P&L"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 

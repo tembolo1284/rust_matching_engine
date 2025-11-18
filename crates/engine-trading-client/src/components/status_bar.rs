@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::app::{App, InputMode};
 
-pub fn draw_status_bar<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let (msg, style) = match app.input_mode {
         InputMode::Normal => {
             let shortcuts = vec![

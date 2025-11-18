@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::App;
 use engine_core::Side;
 
-pub fn draw_trade_list<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_trade_list(f: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec!["Time", "Symbol", "Side", "Price", "Qty"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 

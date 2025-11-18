@@ -1,17 +1,16 @@
 // crates/engine-trading-client/src/components/order_book.rs
 
 use ratatui::{
-    backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Span,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
 
 use crate::app::App;
 
-pub fn draw_order_book<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+pub fn draw_order_book(f: &mut Frame, area: Rect, app: &App) {
     let book = app.order_books.get(&app.current_symbol);
     
     let block = Block::default()
@@ -48,7 +47,7 @@ pub fn draw_order_book<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
     }
 }
 
-fn draw_bids<B: Backend>(f: &mut Frame<B>, area: Rect, bids: &[(u32, u32)], selected: usize) {
+fn draw_bids(f: &mut Frame, area: Rect, bids: &[(u32, u32)], selected: usize) {
     let header = Row::new(vec!["Size", "Bid"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 
@@ -66,18 +65,17 @@ fn draw_bids<B: Backend>(f: &mut Frame<B>, area: Rect, bids: &[(u32, u32)], sele
         .style(style.fg(Color::Green))
     }).collect();
 
-    let table = Table::new(rows)
+    let table = Table::new(rows, &[
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
         .header(header)
-        .block(Block::default().title("BIDS").borders(Borders::TOP))
-        .widths(&[
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ]);
+        .block(Block::default().title("BIDS").borders(Borders::TOP));
 
     f.render_widget(table, area);
 }
 
-fn draw_asks<B: Backend>(f: &mut Frame<B>, area: Rect, asks: &[(u32, u32)], selected: usize) {
+fn draw_asks(f: &mut Frame, area: Rect, asks: &[(u32, u32)], selected: usize) {
     let header = Row::new(vec!["Ask", "Size"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 
@@ -95,13 +93,12 @@ fn draw_asks<B: Backend>(f: &mut Frame<B>, area: Rect, asks: &[(u32, u32)], sele
         .style(style.fg(Color::Red))
     }).collect();
 
-    let table = Table::new(rows)
+    let table = Table::new(rows, &[
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
         .header(header)
-        .block(Block::default().title("ASKS").borders(Borders::TOP))
-        .widths(&[
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ]);
+        .block(Block::default().title("ASKS").borders(Borders::TOP));
 
     f.render_widget(table, area);
 }

@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn draw_help<B: Backend>(f: &mut Frame<B>, area: Rect) {
+pub fn draw_help(f: &mut Frame, area: Rect) {
     // Clear the area first for the overlay
     f.render_widget(Clear, area);
 
