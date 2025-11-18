@@ -98,6 +98,8 @@ pub struct App {
     
     // Order ID counter
     pub next_order_id: u32,
+
+    pub network_tx: Option<UnboundedSender,InputMessage>>,
 }
 
 #[derive(Default, Clone)]
@@ -138,6 +140,7 @@ impl App {
             total_volume: 0,
             message_count: 0,
             next_order_id: 1000,
+            network_tx: None,
         };
         
         // Initialize empty order book for current symbol
@@ -148,7 +151,10 @@ impl App {
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
     }
-    
+    pub fn set_network_sender(&mut self, tx: UnboundedSender<InputMessage>) {
+        self.network_tx = Some(tx);
+    }
+
     pub fn next_panel(&mut self) {
         self.current_panel = match self.current_panel {
             Panel::OrderBook => Panel::Orders,
@@ -180,9 +186,15 @@ impl App {
     }
     
     pub fn cancel_selected_order(&mut self) {
-        // Find selected order and send cancel
-        if let Some(_order) = self.my_orders.values().nth(self.selected_order_index) {
-            // Would send cancel message here
+        if let Some(order) = self.my_orders.values().nth(self.selected_order_index) {
+            let cancel_msg = InputMessage::Cancel(Cancel {
+                user_id: order.user_id,
+                user_order_id: order.order_id,
+            });
+            
+            if let Some(tx) = &self.network_tx {
+                let _ = tx.send(cancel_msg);
+            }
         }
     }
     
@@ -263,16 +275,63 @@ impl App {
     }
     
     pub fn submit_input(&mut self) {
-        // Process input based on context
-        if matches!(self.input_mode, InputMode::Editing) {
-            if let Some(_side) = self.order_side {
-                // Here we would actually send an order using get_next_order_id()
-                let order_id = self.get_next_order_id();
-                // Would create and send order with this ID
-                _ = order_id; // Using it to avoid warning
-            }
+        if !matches!(self.input_mode, InputMode::Editing) {
+            return;
         }
-        self.input_mode = InputMode::Normal;    
+        
+        // If we're in order entry mode with a side selected
+        if let Some(side) = self.order_side.clone() {
+            // Parse quantity
+            let quantity = self.input_buffer.parse::<u32>().unwrap_or(0);
+            if quantity == 0 {
+                return; // Invalid quantity
+            }
+            
+            // Parse price (for limit orders)
+            let price = if self.is_market_order {
+                0
+            } else {
+                (self.order_price_input.parse::<f64>().unwrap_or(0.0) * 100.0) as u32
+            };
+            
+            let order_id = self.get_next_order_id();
+            
+            // Create the order
+            let order_msg = InputMessage::NewOrder(NewOrder {
+                user_id: self.user_id,
+                user_order_id: order_id,
+                symbol: self.current_symbol.clone(),
+                price,
+                quantity,
+                side: side.clone(),
+            });
+            
+            // Store order locally as pending
+            let order = Order {
+                order_id,
+                symbol: self.current_symbol.clone(),
+                side,
+                price,
+                quantity,
+                filled_qty: 0,
+                status: OrderStatus::Pending,
+                timestamp: chrono::Local::now(),
+            };
+            self.my_orders.insert(order_id, order);
+            
+            // Send to network
+            if let Some(tx) = &self.network_tx {
+                let _ = tx.send(order_msg);
+            }
+            
+            // Clear input
+            self.input_buffer.clear();
+            self.order_price_input.clear();
+            self.order_qty_input.clear();
+            self.order_side = None;
+            self.input_mode = InputMode::Normal;
+            self.current_panel = Panel::Orders;
+        }
     }
     
     pub fn cancel_input(&mut self) {

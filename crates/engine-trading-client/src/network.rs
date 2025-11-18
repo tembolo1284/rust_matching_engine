@@ -71,15 +71,22 @@ impl EngineConnection {
         Ok(())
     }
 
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<InputMessage>) {
         let mut heartbeat = interval(Duration::from_secs(30));
         
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    // Send heartbeat/query to keep connection alive
                     if let Err(e) = self.send_heartbeat().await {
                         warn!("Heartbeat failed: {}", e);
+                        self.handle_disconnect().await;
+                    }
+                }
+                
+                Some(msg) = rx.recv() => {
+                    // Send messages from the app
+                    if let Err(e) = self.send(msg).await {
+                        error!("Failed to send message: {}", e);
                         self.handle_disconnect().await;
                     }
                 }
@@ -87,12 +94,12 @@ impl EngineConnection {
                 result = self.read_message() => {
                     match result {
                         Ok(Some(msg)) => {
+                            debug!("Received from server: {:?}", msg);
                             if let Err(e) = self.tx.send(msg) {
                                 error!("Failed to send message to app: {}", e);
                             }
                         }
                         Ok(None) => {
-                            // Connection closed
                             self.handle_disconnect().await;
                         }
                         Err(e) => {

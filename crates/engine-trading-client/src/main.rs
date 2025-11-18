@@ -86,18 +86,42 @@ async fn run_app<B: Backend>(
     mut app: App,
     server_addr: &str,
 ) -> Result<()> {
-    // Create network connection
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut connection = EngineConnection::new(server_addr, tx);
     
+    // Create channels for network communication
+    let (tx_to_network, mut rx_from_app) = mpsc::unbounded_channel::<InputMessage>();
+    let (tx_to_app, mut rx_from_network) = mpsc::unbounded_channel::<OutputMessage>();
+    
+    // Give app the sender to network
+    app.set_network_sender(tx_to_network);
+    
+    // Create network connection
+    let mut connection = EngineConnection::new(server_addr, tx_to_app);
+ 
     // Connect to server
     info!("Connecting to {}...", server_addr);
     connection.connect().await?;
     app.set_connected(true);
     
     // Spawn network handler
+    let server_addr_clone = server_addr.to_string();
     let network_handle = tokio::spawn(async move {
-        connection.run().await;
+        let mut connection = connection;
+        
+        // Run both the connection reader and the message sender
+        tokio::select! {
+            _ = connection.run() => {
+                // Connection reading task
+            }
+            _ = async {
+                while let Some(msg) = rx_from_app.recv().await {
+                    if let Err(e) = connection.send(msg).await {
+                        error!("Failed to send message: {}", e);
+                    }
+                }
+            } => {
+                // Message sending task
+            }
+        }
     });
 
     loop {
