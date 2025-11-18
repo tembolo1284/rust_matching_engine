@@ -34,6 +34,7 @@ pub enum Theme {
 }
 
 /// Market data snapshot
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct MarketData {
     pub symbol: String,
