@@ -21,6 +21,7 @@ use std::{io, time::Duration};
 use tokio::sync::mpsc;
 use tracing::{info, error};
 use engine_core::{InputMessage, OutputMessage};
+
 use crate::app::{App, InputMode};
 use crate::network::EngineConnection;
 
@@ -86,9 +87,8 @@ async fn run_app<B: Backend>(
     mut app: App,
     server_addr: &str,
 ) -> Result<()> {
-    
     // Create channels for network communication
-    let (tx_to_network, mut rx_from_app) = mpsc::unbounded_channel::<InputMessage>();
+    let (tx_to_network, rx_from_app) = mpsc::unbounded_channel::<InputMessage>();
     let (tx_to_app, mut rx_from_network) = mpsc::unbounded_channel::<OutputMessage>();
     
     // Give app the sender to network
@@ -96,14 +96,13 @@ async fn run_app<B: Backend>(
     
     // Create network connection
     let mut connection = EngineConnection::new(server_addr, tx_to_app);
- 
+    
     // Connect to server
     info!("Connecting to {}...", server_addr);
     connection.connect().await?;
     app.set_connected(true);
     
     // Spawn network handler
-    let server_addr_clone = server_addr.to_string();
     let network_handle = tokio::spawn(async move {
         connection.run(rx_from_app).await;
     });
@@ -197,8 +196,8 @@ async fn run_app<B: Backend>(
             }
         }
 
-        // Process network messages
-        while let Ok(msg) = rx.try_recv() {
+        // Process network messages - FIX: use rx_from_network instead of rx
+        while let Ok(msg) = rx_from_network.try_recv() {
             app.handle_engine_message(msg);
         }
 

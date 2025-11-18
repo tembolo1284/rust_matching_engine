@@ -1,10 +1,11 @@
 // crates/engine-trading-client/src/app.rs
 
 use chrono::{DateTime, Local};
-use engine_core::{OutputMessage, Side};
+use engine_core::{OutputMessage, InputMessage, Side};
 use indexmap::IndexMap;
 use std::collections::VecDeque;
 use tokio::sync::mpsc::UnboundedSender;
+use crate::InputMessage::{Cancel, NewOrder};
 
 pub enum InputMode {
     Normal,

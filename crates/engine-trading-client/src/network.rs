@@ -71,7 +71,7 @@ impl EngineConnection {
         Ok(())
     }
 
-    pub async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<InputMessage>) {
+    pub async fn run(&mut self, mut rx: UnboundedReceiver<InputMessage>) {
         let mut heartbeat = interval(Duration::from_secs(30));
         
         loop {

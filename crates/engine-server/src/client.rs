@@ -206,6 +206,7 @@ async fn write_csv_message(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn write_binary_message(
     stream: &mut OwnedWriteHalf,
     msg: &OutputMessage,
