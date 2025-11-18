@@ -2,7 +2,8 @@
 use engine_core::MatchingEngine;
 use engine_protocol::csv_codec::{format_output_legacy, parse_input_line};
 use std::fs;
-use std::path::Path;
+use std::env;
+use std::path::PathBuf;
 
 #[test] 
 fn full_input_matches_reference_output() {
@@ -28,15 +29,12 @@ fn full_input_matches_reference_output() {
         }
     }
     
-    // Create the output directory if it doesn't exist
-    let output_dir = Path::new("crates/engine-core/tests/data");
-    if !output_dir.exists() {
-        fs::create_dir_all(output_dir)
-            .expect("Failed to create output directory");
-    }
+    // Use the manifest directory (crate root) to find the correct path
+    let mut output_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    output_path.push("tests");
+    output_path.push("data");
+    output_path.push("output_file_rust.csv");
     
-    // Write the Rust output for inspection
-    let output_path = output_dir.join("output_file_rust.csv");
     let output_content = actual_lines.join("\n");
     
     fs::write(&output_path, &output_content)
