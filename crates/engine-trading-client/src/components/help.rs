@@ -1,7 +1,6 @@
 // crates/engine-trading-client/src/components/help.rs
 
 use ratatui::{
-    backend::Backend,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},

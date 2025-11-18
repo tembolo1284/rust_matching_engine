@@ -1,8 +1,7 @@
 // crates/engine-trading-client/src/components/positions.rs
 
 use ratatui::{
-    backend::Backend,
-    layout::Rect,
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Row, Table},
     Frame,
@@ -40,17 +39,18 @@ pub fn draw_positions(f: &mut Frame, area: Rect, app: &App) {
         ])
     }).collect();
 
-    let table = Table::new(rows)
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Min(10),
+    ];
+
+    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
         .header(header)
         .block(Block::default()
             .title(" Positions ")
-            .borders(Borders::ALL))
-        .widths(&[
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Min(10),
-        ]);
+            .borders(Borders::ALL));
 
     f.render_widget(table, area);
 }

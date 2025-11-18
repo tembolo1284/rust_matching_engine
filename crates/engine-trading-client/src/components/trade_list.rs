@@ -1,8 +1,7 @@
 // crates/engine-trading-client/src/components/trade_list.rs
 
 use ratatui::{
-    backend::Backend,
-    layout::Rect,
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Row, Table},
     Frame,
@@ -30,7 +29,15 @@ pub fn draw_trade_list(f: &mut Frame, area: Rect, app: &App) {
         ])
     }).collect();
 
-    let table = Table::new(rows)
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Min(6),
+    ];
+
+    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
         .header(header)
         .block(Block::default()
             .title(" Recent Trades ")
@@ -41,14 +48,7 @@ pub fn draw_trade_list(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Color::White
                 }
-            )))
-        .widths(&[
-            ratatui::layout::Constraint::Length(10),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(6),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Min(6),
-        ]);
+            )));
 
     f.render_widget(table, area);
 }

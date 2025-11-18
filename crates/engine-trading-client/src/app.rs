@@ -10,6 +10,7 @@ pub enum InputMode {
     Editing,
 }
 
+#[derive(PartialEq)]
 pub enum Panel {
     OrderBook,
     Orders,
@@ -29,8 +30,9 @@ pub struct Order {
     pub timestamp: DateTime<Local>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum OrderStatus {
+    #[allow(dead_code)]
     Pending,
     Open,
     PartiallyFilled,
@@ -179,7 +181,7 @@ impl App {
     
     pub fn cancel_selected_order(&mut self) {
         // Find selected order and send cancel
-        if let Some(order) = self.my_orders.values().nth(self.selected_order_index) {
+        if let Some(_order) = self.my_orders.values().nth(self.selected_order_index) {
             // Would send cancel message here
         }
     }
@@ -253,11 +255,24 @@ impl App {
     pub fn toggle_depth(&mut self) {
         self.show_depth = !self.show_depth;
     }
+
+    pub fn get_next_order_id(&mut self) -> u32 {
+        let id = self.next_order_id;
+        self.next_order_id += 1;
+        id
+    }
     
     pub fn submit_input(&mut self) {
         // Process input based on context
-        self.input_mode = InputMode::Normal;
-        // Would send order here
+        if matches!(self.input_mode, InputMode::Editing) {
+            if let Some(_side) = self.order_side {
+                // Here we would actually send an order using get_next_order_id()
+                let order_id = self.get_next_order_id();
+                // Would create and send order with this ID
+                _ = order_id; // Using it to avoid warning
+            }
+        }
+        self.input_mode = InputMode::Normal;    
     }
     
     pub fn cancel_input(&mut self) {

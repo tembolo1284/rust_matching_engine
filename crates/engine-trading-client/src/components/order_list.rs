@@ -1,8 +1,7 @@
 // crates/engine-trading-client/src/components/order_list.rs
 
 use ratatui::{
-    backend::Backend,
-    layout::Rect,
+    layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Row, Table},
     Frame,
@@ -12,7 +11,8 @@ use crate::app::{App, OrderStatus};
 use engine_core::Side;
 
 pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
-    let header = Row::new(vec!["ID", "Side", "Price", "Qty", "Filled", "Status"])
+    // Updated header to include Time and Symbol
+    let header = Row::new(vec!["Time", "ID", "Sym", "Side", "Price", "Qty", "Fill", "Status"])
         .style(Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD));
 
     let rows: Vec<Row> = app.my_orders.values().enumerate().map(|(i, order)| {
@@ -36,7 +36,9 @@ pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
         };
 
         Row::new(vec![
+            Cell::from(order.timestamp.format("%H:%M:%S").to_string()).style(style),  // Added timestamp
             Cell::from(order.order_id.to_string()).style(style),
+            Cell::from(order.symbol.clone()).style(style),  // Added symbol
             Cell::from(format!("{:?}", order.side)).style(side_style),
             Cell::from(format_price(order.price)).style(style),
             Cell::from(order.quantity.to_string()).style(style),
@@ -45,7 +47,18 @@ pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
         ])
     }).collect();
 
-    let table = Table::new(rows)
+    let widths = [
+        Constraint::Length(8),   // Time
+        Constraint::Length(6),   // ID
+        Constraint::Length(6),   // Symbol
+        Constraint::Length(5),   // Side
+        Constraint::Length(7),   // Price
+        Constraint::Length(5),   // Qty
+        Constraint::Length(5),   // Filled
+        Constraint::Min(8),      // Status
+    ];
+
+    let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default()
             .title(" My Orders ")
@@ -56,15 +69,7 @@ pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Color::White
                 }
-            )))
-        .widths(&[
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(6),
-            ratatui::layout::Constraint::Length(8),
-            ratatui::layout::Constraint::Length(6),
-            ratatui::layout::Constraint::Length(6),
-            ratatui::layout::Constraint::Min(10),
-        ]);
+            )));
 
     f.render_widget(table, area);
 }

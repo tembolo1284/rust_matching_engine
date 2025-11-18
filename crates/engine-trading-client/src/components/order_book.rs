@@ -3,7 +3,6 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Span,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
@@ -65,10 +64,12 @@ fn draw_bids(f: &mut Frame, area: Rect, bids: &[(u32, u32)], selected: usize) {
         .style(style.fg(Color::Green))
     }).collect();
 
-    let table = Table::new(rows, &[
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+    let widths = [
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ];
+
+    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
         .header(header)
         .block(Block::default().title("BIDS").borders(Borders::TOP));
 
@@ -93,10 +94,12 @@ fn draw_asks(f: &mut Frame, area: Rect, asks: &[(u32, u32)], selected: usize) {
         .style(style.fg(Color::Red))
     }).collect();
 
-    let table = Table::new(rows, &[
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+    let widths = [
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ];
+
+    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
         .header(header)
         .block(Block::default().title("ASKS").borders(Borders::TOP));
 

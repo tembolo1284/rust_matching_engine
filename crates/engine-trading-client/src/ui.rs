@@ -1,7 +1,6 @@
 // crates/engine-trading-client/src/ui.rs
 
 use ratatui::{
-    backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -20,7 +19,7 @@ use crate::components::{
     help::draw_help,
 };
 
-pub fn draw<B: Backend>(f: &mut Frame<B>, app: &App) {
+pub fn draw(f: &mut Frame, app: &App) {
     // Main layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -46,7 +45,7 @@ pub fn draw<B: Backend>(f: &mut Frame<B>, app: &App) {
     }
 }
 
-fn draw_header<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -91,7 +90,7 @@ fn draw_header<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
     f.render_widget(right_paragraph, header_chunks[2]);
 }
 
-fn draw_main_content<B: Backend>(f: &mut Frame<B>, area: Rect, app: &App) {
+fn draw_main_content(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
