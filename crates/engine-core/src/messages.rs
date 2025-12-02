@@ -1,196 +1,201 @@
-//! Message types used by the core matching engine.
+//! Message types for the matching engine.
 //!
-//! These are **transport-agnostic** logical messages:
-//! - [`InputMessage`]: what the engine consumes.
-//! - [`OutputMessage`]: what the engine produces.
+//! # Design Principles
+//! - **Zero heap allocation**: All messages use `Symbol` (8 bytes) instead of `String`.
+//! - **Symbol in every output**: Enables stateless routing/logging downstream.
+//! - **`repr(C)`**: Predictable memory layout for potential direct serialization.
+//! - **`Copy` where possible**: Cheap to pass by value.
 //!
-//! All output messages are **symbol-aware** so the networking layer
-//! can route / log them without extra context.
-//!
-//! Note: Binary / CSV encoders live in the `engine-protocol` crate;
-//! this module is purely logical.
 
 use crate::order_type::OrderType;
 use crate::side::Side;
+use crate::symbol::Symbol;
 
-/// A high-level request into the matching engine.
-///
-/// This corresponds to your C++ `InputMessage` variant, but with:
-/// - `QueryTopOfBook` support (for asking the current top-of-book),
-/// - Strongly-typed structs instead of `std::variant`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// =============================================================================
+// Input Messages
+// =============================================================================
+
+/// Input message to the matching engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMessage {
-    /// New order: market (price = 0) or limit (price > 0).
+    /// New order submission.
     NewOrder(NewOrder),
-
-    /// Cancel an existing order by `(user_id, user_order_id)`.
+    /// Cancel an existing order.
     Cancel(Cancel),
-
-    /// Flush all order books and internal state.
+    /// Flush all order books.
     Flush,
-
-    /// Query the current top-of-book for a given symbol.
+    /// Query current top-of-book for a symbol.
     QueryTopOfBook(TopOfBookQuery),
 }
 
-/// A high-level event emitted by the matching engine.
+/// New order request.
 ///
-/// This corresponds to your C++ `OutputMessage` variant, but:
-/// - Every variant now includes `symbol` directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputMessage {
-    /// Acknowledgement of a new order.
-    Ack(Ack),
-
-    /// Acknowledgement of a cancel request.
-    CancelAck(CancelAck),
-
-    /// Trade event between a buyer and a seller.
-    Trade(Trade),
-
-    /// Top-of-book change or snapshot.
-    TopOfBook(TopOfBook),
-}
-
-/// New order message (input).
-///
-/// Equivalent to your C++ `NewOrderMessage`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Size: 32 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct NewOrder {
-    /// User identifier (logical session / account).
+    /// User/session identifier.
     pub user_id: u32,
-
-    /// Instrument symbol, e.g. `"IBM"` or `"BTC-USD"`.
-    pub symbol: String,
-
-    /// Price in integer ticks.
-    /// - `0` => market order
-    /// - `>0` => limit order
+    /// User-assigned order ID (for cancel/fill tracking).
+    pub user_order_id: u32,
+    /// Symbol (fixed 8 bytes).
+    pub symbol: Symbol,
+    /// Price in ticks. 0 = market order.
     pub price: u32,
-
-    /// Original quantity.
+    /// Quantity to buy/sell.
     pub quantity: u32,
-
     /// Buy or Sell.
     pub side: Side,
-
-    /// User-local order identifier (for canceling later).
-    pub user_order_id: u32,
+    /// Padding for alignment.
+    _pad: [u8; 3],
 }
 
 impl NewOrder {
-    /// Helper: returns the corresponding `OrderType`
-    /// (market vs limit) based on price.
-    pub fn order_type(&self) -> OrderType {
-        if self.price == 0 {
-            OrderType::Market
-        } else {
-            OrderType::Limit
+    #[inline]
+    pub fn new(
+        user_id: u32,
+        user_order_id: u32,
+        symbol: Symbol,
+        price: u32,
+        quantity: u32,
+        side: Side,
+    ) -> Self {
+        NewOrder {
+            user_id,
+            user_order_id,
+            symbol,
+            price,
+            quantity,
+            side,
+            _pad: [0; 3],
         }
+    }
+
+    /// Infer order type from price.
+    #[inline]
+    pub fn order_type(&self) -> OrderType {
+        OrderType::from_price(self.price)
     }
 }
 
-/// Cancel message (input).
+/// Cancel order request.
 ///
-/// Equivalent to your C++ `CancelMessage`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Note: Symbol is not included here because the engine tracks
+/// order-to-symbol mapping internally. The output CancelAck will
+/// include the symbol.
+///
+/// Size: 8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Cancel {
     pub user_id: u32,
     pub user_order_id: u32,
 }
 
-/// Query top-of-book message (input).
-///
-/// NEW compared to the C++ version:
-/// lets a client ask for the current best bid/ask for a symbol.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopOfBookQuery {
-    /// Symbol whose top-of-book is requested.
-    pub symbol: String,
+impl Cancel {
+    #[inline]
+    pub fn new(user_id: u32, user_order_id: u32) -> Self {
+        Cancel { user_id, user_order_id }
+    }
 }
 
-/// Acknowledgement of a new order (output).
+/// Top-of-book query request.
 ///
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Size: 8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct TopOfBookQuery {
+    pub symbol: Symbol,
+}
+
+impl TopOfBookQuery {
+    #[inline]
+    pub fn new(symbol: Symbol) -> Self {
+        TopOfBookQuery { symbol }
+    }
+}
+
+// =============================================================================
+// Output Messages
+// =============================================================================
+
+/// Output message from the matching engine.
+///
+/// Every variant includes the symbol for stateless downstream routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMessage {
+    /// Order accepted.
+    Ack(Ack),
+    /// Cancel processed.
+    CancelAck(CancelAck),
+    /// Trade executed.
+    Trade(Trade),
+    /// Top-of-book update.
+    TopOfBook(TopOfBook),
+}
+
+/// Order acknowledgement.
+///
+/// Size: 16 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Ack {
     pub user_id: u32,
     pub user_order_id: u32,
-    pub symbol: String,
+    pub symbol: Symbol,
 }
 
-/// Acknowledgement of a cancel request (output).
+impl Ack {
+    #[inline]
+    pub fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
+        Ack { user_id, user_order_id, symbol }
+    }
+}
+
+/// Cancel acknowledgement.
 ///
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Size: 16 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct CancelAck {
     pub user_id: u32,
     pub user_order_id: u32,
-    pub symbol: String,
+    pub symbol: Symbol,
 }
 
-/// Trade event (output).
+impl CancelAck {
+    #[inline]
+    pub fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
+        CancelAck { user_id, user_order_id, symbol }
+    }
+}
+
+/// Trade execution report.
 ///
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Size: 40 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct Trade {
-    /// Instrument symbol.
-    pub symbol: String,
-
+    /// Symbol traded.
+    pub symbol: Symbol,
+    /// Buyer's user ID.
     pub user_id_buy: u32,
+    /// Buyer's order ID.
     pub user_order_id_buy: u32,
-
+    /// Seller's user ID.
     pub user_id_sell: u32,
+    /// Seller's order ID.
     pub user_order_id_sell: u32,
-
+    /// Execution price.
     pub price: u32,
+    /// Execution quantity.
     pub quantity: u32,
 }
 
-/// Top-of-book event (output).
-///
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopOfBook {
-    /// Instrument symbol.
-    pub symbol: String,
-
-    /// Side this TOB event refers to (bid or ask).
-    pub side: Side,
-
-    /// Best price; `0` means "no price" (side eliminated).
-    pub price: u32,
-
-    /// Total quantity at the best price; `0` implies eliminated.
-    pub total_quantity: u32,
-
-    /// True when the side is eliminated (no orders on that side).
-    /// When `true`, `price` and `total_quantity` should be ignored.
-    pub eliminated: bool,
-}
-
-// -----------------------------------------------------------------------------
-// Convenience constructors (similar spirit to your C++ static helpers)
-// -----------------------------------------------------------------------------
-
-impl OutputMessage {
-    /// Convenience constructor for an Ack event.
-    pub fn ack(user_id: u32, user_order_id: u32, symbol: impl Into<String>) -> Self {
-        OutputMessage::Ack(Ack {
-            user_id,
-            user_order_id,
-            symbol: symbol.into(),
-        })
-    }
-
-    /// Convenience constructor for a CancelAck event.
-    pub fn cancel_ack(user_id: u32, user_order_id: u32, symbol: impl Into<String>) -> Self {
-        OutputMessage::CancelAck(CancelAck {
-            user_id,
-            user_order_id,
-            symbol: symbol.into(),
-        })
-    }
-
-    /// Convenience constructor for a Trade event.
-    pub fn trade(
-        symbol: impl Into<String>,
+impl Trade {
+    #[inline]
+    pub fn new(
+        symbol: Symbol,
         user_id_buy: u32,
         user_order_id_buy: u32,
         user_id_sell: u32,
@@ -198,42 +203,171 @@ impl OutputMessage {
         price: u32,
         quantity: u32,
     ) -> Self {
-        OutputMessage::Trade(Trade {
-            symbol: symbol.into(),
+        Trade {
+            symbol,
             user_id_buy,
             user_order_id_buy,
             user_id_sell,
             user_order_id_sell,
             price,
             quantity,
-        })
-    }
-
-    /// Convenience constructor for a non-eliminated top-of-book event.
-    pub fn top_of_book(
-        symbol: impl Into<String>,
-        side: Side,
-        price: u32,
-        total_quantity: u32,
-    ) -> Self {
-        OutputMessage::TopOfBook(TopOfBook {
-            symbol: symbol.into(),
-            side,
-            price,
-            total_quantity,
-            eliminated: false,
-        })
-    }
-
-    /// Convenience constructor for an eliminated top-of-book event.
-    pub fn top_of_book_eliminated(symbol: impl Into<String>, side: Side) -> Self {
-        OutputMessage::TopOfBook(TopOfBook {
-            symbol: symbol.into(),
-            side,
-            price: 0,
-            total_quantity: 0,
-            eliminated: true,
-        })
+        }
     }
 }
 
+/// Top-of-book update.
+///
+/// Size: 24 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct TopOfBook {
+    /// Symbol.
+    pub symbol: Symbol,
+    /// Which side (bid or ask).
+    pub side: Side,
+    /// True if this side has no orders (eliminated).
+    pub eliminated: bool,
+    /// Padding.
+    _pad: [u8; 2],
+    /// Best price (0 if eliminated).
+    pub price: u32,
+    /// Total quantity at best price (0 if eliminated).
+    pub total_quantity: u32,
+}
+
+impl TopOfBook {
+    /// Create an active (non-eliminated) top-of-book update.
+    #[inline]
+    pub fn active(symbol: Symbol, side: Side, price: u32, total_quantity: u32) -> Self {
+        debug_assert!(price > 0, "active TOB must have price > 0");
+        debug_assert!(total_quantity > 0, "active TOB must have quantity > 0");
+        TopOfBook {
+            symbol,
+            side,
+            eliminated: false,
+            _pad: [0; 2],
+            price,
+            total_quantity,
+        }
+    }
+
+    /// Create an eliminated top-of-book update.
+    #[inline]
+    pub fn eliminated(symbol: Symbol, side: Side) -> Self {
+        TopOfBook {
+            symbol,
+            side,
+            eliminated: true,
+            _pad: [0; 2],
+            price: 0,
+            total_quantity: 0,
+        }
+    }
+
+    /// Check if this side is eliminated (no orders).
+    #[inline]
+    pub fn is_eliminated(&self) -> bool {
+        self.eliminated
+    }
+}
+
+// =============================================================================
+// Convenience constructors on OutputMessage
+// =============================================================================
+
+impl OutputMessage {
+    #[inline]
+    pub fn ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
+        OutputMessage::Ack(Ack::new(user_id, user_order_id, symbol))
+    }
+
+    #[inline]
+    pub fn cancel_ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
+        OutputMessage::CancelAck(CancelAck::new(user_id, user_order_id, symbol))
+    }
+
+    #[inline]
+    pub fn trade(
+        symbol: Symbol,
+        user_id_buy: u32,
+        user_order_id_buy: u32,
+        user_id_sell: u32,
+        user_order_id_sell: u32,
+        price: u32,
+        quantity: u32,
+    ) -> Self {
+        OutputMessage::Trade(Trade::new(
+            symbol,
+            user_id_buy,
+            user_order_id_buy,
+            user_id_sell,
+            user_order_id_sell,
+            price,
+            quantity,
+        ))
+    }
+
+    #[inline]
+    pub fn top_of_book(symbol: Symbol, side: Side, price: u32, total_quantity: u32) -> Self {
+        OutputMessage::TopOfBook(TopOfBook::active(symbol, side, price, total_quantity))
+    }
+
+    #[inline]
+    pub fn top_of_book_eliminated(symbol: Symbol, side: Side) -> Self {
+        OutputMessage::TopOfBook(TopOfBook::eliminated(symbol, side))
+    }
+
+    /// Extract the symbol from any output message.
+    #[inline]
+    pub fn symbol(&self) -> Symbol {
+        match self {
+            OutputMessage::Ack(m) => m.symbol,
+            OutputMessage::CancelAck(m) => m.symbol,
+            OutputMessage::Trade(m) => m.symbol,
+            OutputMessage::TopOfBook(m) => m.symbol,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_order_size() {
+        assert_eq!(std::mem::size_of::<NewOrder>(), 32);
+    }
+
+    #[test]
+    fn test_ack_size() {
+        assert_eq!(std::mem::size_of::<Ack>(), 16);
+    }
+
+    #[test]
+    fn test_trade_size() {
+        assert_eq!(std::mem::size_of::<Trade>(), 40);
+    }
+
+    #[test]
+    fn test_top_of_book_size() {
+        assert_eq!(std::mem::size_of::<TopOfBook>(), 24);
+    }
+
+    #[test]
+    fn test_output_message_symbol_extraction() {
+        let sym = Symbol::from_str("AAPL");
+        
+        let ack = OutputMessage::ack(1, 2, sym);
+        assert_eq!(ack.symbol(), sym);
+
+        let trade = OutputMessage::trade(sym, 1, 2, 3, 4, 100, 50);
+        assert_eq!(trade.symbol(), sym);
+    }
+
+    #[test]
+    fn test_messages_are_copy() {
+        let msg = OutputMessage::ack(1, 2, Symbol::from_str("IBM"));
+        let msg2 = msg; // Copy
+        assert_eq!(msg, msg2);
+    }
+}

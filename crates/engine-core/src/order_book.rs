@@ -1,277 +1,201 @@
 //! Single-symbol order book with price-time priority.
 //!
-//!" This is the Rust analogue of your C++ `OrderBook`:
-//! - One instance per symbol.
-//! - Bids: descending by price (best = highest).
-//! - Asks: ascending by price (best = lowest).
-//! - FIFO (time-priority) within each price level.
+//! # Cache Optimization
+//! - Price levels stored in sorted `Vec` for cache-friendly iteration.
+//! - Orders stored by index into a pre-allocated pool (handled by engine).
+//! - Hot fields (best bid/ask) cached to avoid repeated lookups.
 //!
-//! Differences vs the C++ implementation:
-//! - For simplicity and safety, cancellation currently does a linear
-//!   search over the relevant side instead of storing raw iterators
-//!   (which are tricky to model safely in Rust without arenas/unsafe).
-//!   Semantics are the same; complexity is slightly higher for cancels.
-
-use std::collections::{BTreeMap, VecDeque};
+//! # Design Decisions
+//! - Uses `Vec` instead of `BTreeMap` for better cache locality.
+//! - Outputs written to caller-provided buffer (no allocation).
+//! - Bounded iteration with explicit limits.
 
 use crate::messages::{NewOrder, OutputMessage};
 use crate::order::Order;
 use crate::order_type::OrderType;
 use crate::side::Side;
+use crate::symbol::Symbol;
 use crate::top_of_book::TopOfBookSnapshot;
+
+/// Maximum iterations for matching loop (Power of Ten Rule 2).
+const MAX_MATCH_ITERATIONS: usize = 100_000;
+
+/// Maximum orders per price level before warning.
+const MAX_ORDERS_PER_LEVEL: usize = 10_000;
+
+/// Maximum price levels per side.
+const MAX_PRICE_LEVELS: usize = 10_000;
+
+/// A price level containing orders at a single price.
+#[derive(Debug, Clone)]
+struct PriceLevel {
+    price: u32,
+    orders: Vec<Order>,
+}
+
+impl PriceLevel {
+    fn new(price: u32) -> Self {
+        PriceLevel {
+            price,
+            orders: Vec::with_capacity(64), // Pre-allocate reasonable capacity
+        }
+    }
+
+    fn with_capacity(price: u32, capacity: usize) -> Self {
+        PriceLevel {
+            price,
+            orders: Vec::with_capacity(capacity),
+        }
+    }
+
+    #[inline]
+    fn total_quantity(&self) -> u32 {
+        self.orders.iter().map(|o| o.remaining_qty).sum()
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
+}
 
 /// Single-symbol order book.
 #[derive(Debug)]
 pub struct OrderBook {
-    symbol: String,
+    /// Symbol for this book.
+    symbol: Symbol,
 
-    /// Bids: price -> FIFO queue of orders at that price.
-    ///
-    /// We use `BTreeMap` so keys are sorted ascending; we treat the
-    /// highest key as best bid.
-    bids: BTreeMap<u32, VecDeque<Order>>,
+    /// Bid price levels, sorted descending by price (best bid at index 0).
+    bids: Vec<PriceLevel>,
 
-    /// Asks: price -> FIFO queue of orders at that price.
-    ///
-    /// We use `BTreeMap` so keys are sorted ascending; we treat the
-    /// lowest key as best ask.
-    asks: BTreeMap<u32, VecDeque<Order>>,
+    /// Ask price levels, sorted ascending by price (best ask at index 0).
+    asks: Vec<PriceLevel>,
 
-    /// Cache of previous top-of-book for change detection.
-    prev_best_bid_price: u32,
-    prev_best_bid_qty: u32,
-    prev_best_ask_price: u32,
-    prev_best_ask_qty: u32,
+    /// Cached previous top-of-book for change detection.
+    prev_tob: TopOfBookSnapshot,
 }
 
 impl OrderBook {
     /// Create a new order book for the given symbol.
-    pub fn new(symbol: impl Into<String>) -> Self {
+    pub fn new(symbol: Symbol) -> Self {
         OrderBook {
-            symbol: symbol.into(),
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-            prev_best_bid_price: 0,
-            prev_best_bid_qty: 0,
-            prev_best_ask_price: 0,
-            prev_best_ask_qty: 0,
+            symbol,
+            bids: Vec::with_capacity(256),
+            asks: Vec::with_capacity(256),
+            prev_tob: TopOfBookSnapshot::EMPTY,
+        }
+    }
+
+    /// Create with pre-allocated capacity.
+    pub fn with_capacity(symbol: Symbol, levels_per_side: usize) -> Self {
+        OrderBook {
+            symbol,
+            bids: Vec::with_capacity(levels_per_side),
+            asks: Vec::with_capacity(levels_per_side),
+            prev_tob: TopOfBookSnapshot::EMPTY,
         }
     }
 
     /// Returns the symbol of this book.
-    pub fn symbol(&self) -> &str {
-        &self.symbol
+    #[inline]
+    pub fn symbol(&self) -> Symbol {
+        self.symbol
     }
 
-    /// Process a new order, returning output messages:
-    /// - Ack
-    /// - Trades
-    /// - Top-of-book changes
+    /// Process a new order, writing outputs to the provided buffer.
     ///
-    /// This matches the behavior of your C++ `addOrder`.
-    pub fn add_order(&mut self, msg: &NewOrder) -> Vec<OutputMessage> {
-        let mut outputs = Vec::new();
+    /// Outputs: Ack, Trades, TopOfBook changes.
+    pub fn add_order(&mut self, msg: &NewOrder, timestamp_ns: u64, outputs: &mut Vec<OutputMessage>) {
+        debug_assert_eq!(msg.symbol, self.symbol, "order symbol mismatch");
+        debug_assert!(msg.quantity > 0, "order quantity must be > 0");
 
-        // Create an internal order with timestamp.
-        let mut order = Order::from_new_order_now(msg);
+        // Create internal order
+        let mut order = Order::new(
+            msg.user_id,
+            msg.user_order_id,
+            self.symbol,
+            msg.price,
+            msg.quantity,
+            msg.side,
+            timestamp_ns,
+        );
 
-        // Ack.
-        outputs.push(OutputMessage::ack(
-            order.user_id,
-            order.user_order_id,
-            self.symbol.clone(),
-        ));
+        // Ack immediately
+        outputs.push(OutputMessage::ack(order.user_id, order.user_order_id, self.symbol));
 
-        // Match against the opposing side.
-        let trade_outputs = self.match_order(&mut order);
-        outputs.extend(trade_outputs);
+        // Match against opposing side
+        self.match_order(&mut order, outputs);
 
-        // If there's remaining quantity and it's a limit order, add to book.
+        // Add remainder to book if limit order with remaining qty
         if order.remaining_qty > 0 && order.order_type == OrderType::Limit {
             self.add_to_book(order);
         }
 
-        // Emit top-of-book changes (if any).
-        let tob_outputs = self.check_top_of_book_changes();
-        outputs.extend(tob_outputs);
-
-        outputs
+        // Emit TOB changes
+        self.emit_tob_changes(outputs);
     }
 
-    /// Cancel an order by `(user_id, user_order_id)`.
+    /// Cancel an order by (user_id, user_order_id).
     ///
-    /// Semantics mirror C++ `cancelOrder`:
-    /// - If the order exists, remove it from the book and emit:
-    ///   - CancelAck
-    ///   - Top-of-book changes (if affected).
-    /// - If it doesn't exist, still emit a CancelAck.
-    ///
-    /// Note: We don't get the symbol here; the `MatchingEngine` routes
-    /// cancel to the correct `OrderBook` based on its own mapping, just
-    /// like your C++ engine.
-    pub fn cancel_order(&mut self, user_id: u32, user_order_id: u32) -> Vec<OutputMessage> {
-        let mut outputs = Vec::new();
+    /// Returns true if the order was found and removed.
+    pub fn cancel_order(
+        &mut self,
+        user_id: u32,
+        user_order_id: u32,
+        outputs: &mut Vec<OutputMessage>,
+    ) -> bool {
+        let found = self.remove_order(user_id, user_order_id);
 
-        // Helper lambda: try to remove from a side (bids or asks).
-        fn remove_from_side(
-            _side: Side,
-            _book_symbol: &str,
-            levels: &mut BTreeMap<u32, VecDeque<Order>>,
-            user_id: u32,
-            user_order_id: u32,
-        ) -> bool {
-            // Iterate over all price levels; in practice the depth is usually small.
-            let mut empty_prices = Vec::new();
+        // Always emit CancelAck
+        outputs.push(OutputMessage::cancel_ack(user_id, user_order_id, self.symbol));
 
-            for (price, orders) in levels.iter_mut() {
-                let mut idx = 0;
-                while idx < orders.len() {
-                    if let Some(o) = orders.get(idx) {
-                        if o.user_id == user_id && o.user_order_id == user_order_id {
-                            // Found the order; remove it.
-                            orders.remove(idx);
-                            if orders.is_empty() {
-                                empty_prices.push(*price);
-                            }
-                            return true;
-                        }
-                    }
-                    idx += 1;
-                }
-            }
-
-            // Clean up any now-empty price levels.
-            for p in empty_prices {
-                levels.remove(&p);
-            }
-
-            false
-        }
-
-        // Try bids then asks.
-        let mut found = remove_from_side(Side::Buy, &self.symbol, &mut self.bids, user_id, user_order_id);
-        if !found {
-            found = remove_from_side(Side::Sell, &self.symbol, &mut self.asks, user_id, user_order_id);
-        }
-
-        // Always emit CancelAck, even if not found (matches your C++ behavior).
-        outputs.push(OutputMessage::cancel_ack(
-            user_id,
-            user_order_id,
-            self.symbol.clone(),
-        ));
-
-        // If we actually removed something, TOB may have changed.
+        // Emit TOB changes if we removed something
         if found {
-            let tob_outputs = self.check_top_of_book_changes();
-            outputs.extend(tob_outputs);
+            self.emit_tob_changes(outputs);
         }
 
-        outputs
+        found
     }
 
-    /// Flush/clear the entire order book.
-    /// - Emit CancelAck for every live order (both sides),
-    /// - Emit TopOfBook eliminated messages for any side that had orders,
-    /// - Then clear all internal state.
-    pub fn flush(&mut self) -> Vec<OutputMessage> {
-        let mut outputs = Vec::new();
-
-        // Cancel acks for all bid orders
-        for (_price, orders) in &self.bids {
-            for order in orders {
+    /// Flush all orders from the book.
+    pub fn flush(&mut self, outputs: &mut Vec<OutputMessage>) {
+        // Cancel acks for all orders
+        for level in &self.bids {
+            for order in &level.orders {
                 outputs.push(OutputMessage::cancel_ack(
                     order.user_id,
                     order.user_order_id,
-                    self.symbol.clone(),
+                    self.symbol,
+                ));
+            }
+        }
+        for level in &self.asks {
+            for order in &level.orders {
+                outputs.push(OutputMessage::cancel_ack(
+                    order.user_id,
+                    order.user_order_id,
+                    self.symbol,
                 ));
             }
         }
 
-        // Cancel acks for all ask orders
-        for (_price, orders) in &self.asks {
-            for order in orders {
-                outputs.push(OutputMessage::cancel_ack(
-                    order.user_id,
-                    order.user_order_id,
-                    self.symbol.clone(),
-                ));
-            }
-        }
-
-        // Top-of-book eliminated messages if either side was non-empty
+        // TOB eliminated if there were orders
         if !self.bids.is_empty() {
-            outputs.push(OutputMessage::top_of_book_eliminated(
-                self.symbol.clone(),
-                Side::Buy,
-            ));
+            outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Buy));
         }
         if !self.asks.is_empty() {
-            outputs.push(OutputMessage::top_of_book_eliminated(
-                self.symbol.clone(),
-                Side::Sell,
-            ));
+            outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Sell));
         }
 
-        // Now clear internal state
+        // Clear
         self.bids.clear();
         self.asks.clear();
-        self.prev_best_bid_price = 0;
-        self.prev_best_bid_qty = 0;
-        self.prev_best_ask_price = 0;
-        self.prev_best_ask_qty = 0;
-
-        outputs
+        self.prev_tob = TopOfBookSnapshot::EMPTY;
     }
 
-    /// Get best bid price (0 if none).
-    pub fn best_bid_price(&self) -> u32 {
-        self.bids
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Get best ask price (0 if none).
-    pub fn best_ask_price(&self) -> u32 {
-        self.asks
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Get total quantity at best bid (0 if none).
-    pub fn best_bid_quantity(&self) -> u32 {
-        match self.bids.keys().next_back().copied() {
-            Some(price) => {
-                if let Some(orders) = self.bids.get(&price) {
-                    Self::total_quantity_at_price(orders)
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        }
-    }
-
-    /// Get total quantity at best ask (0 if none).
-    pub fn best_ask_quantity(&self) -> u32 {
-        match self.asks.keys().next().copied() {
-            Some(price) => {
-                if let Some(orders) = self.asks.get(&price) {
-                    Self::total_quantity_at_price(orders)
-                } else {
-                    0
-                }
-            }
-            None => 0,
-        }
-    }
-
-    /// Return a simple snapshot of the current top-of-book.
-    pub fn top_of_book_snapshot(&self) -> TopOfBookSnapshot {
+    /// Get current top-of-book snapshot.
+    #[inline]
+    pub fn top_of_book(&self) -> TopOfBookSnapshot {
         TopOfBookSnapshot::new(
             self.best_bid_price(),
             self.best_bid_quantity(),
@@ -280,214 +204,380 @@ impl OrderBook {
         )
     }
 
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
+    /// Best bid price (0 if empty).
+    #[inline]
+    pub fn best_bid_price(&self) -> u32 {
+        self.bids.first().map(|l| l.price).unwrap_or(0)
+    }
 
-    /// Match an incoming active order against the opposite side of the book.
-    ///
-    /// Fills generate Trade events. Any remaining quantity is left in the
-    /// `order` object for the caller to potentially add to the book.
-    fn match_order(&mut self, order: &mut Order) -> Vec<OutputMessage> {
-        let mut outputs = Vec::new();
+    /// Best ask price (0 if empty).
+    #[inline]
+    pub fn best_ask_price(&self) -> u32 {
+        self.asks.first().map(|l| l.price).unwrap_or(0)
+    }
 
-        match order.side {
-            Side::Buy => {
-                // Buy order: match against asks (ascending price).
-                loop {
-                    if order.remaining_qty == 0 || self.asks.is_empty() {
-                        break;
-                    }
+    /// Total quantity at best bid.
+    #[inline]
+    pub fn best_bid_quantity(&self) -> u32 {
+        self.bids.first().map(|l| l.total_quantity()).unwrap_or(0)
+    }
 
-                    // Clone key to satisfy borrow rules.
-                    let best_ask_price_opt = self.asks.keys().next().copied();
-                    let best_ask_price = match best_ask_price_opt {
-                        Some(p) => p,
-                        None => break,
-                    };
+    /// Total quantity at best ask.
+    #[inline]
+    pub fn best_ask_quantity(&self) -> u32 {
+        self.asks.first().map(|l| l.total_quantity()).unwrap_or(0)
+    }
 
-                    // Can we match?
-                    let can_match = match order.order_type {
-                        OrderType::Market => true,
-                        OrderType::Limit => order.price >= best_ask_price,
-                    };
-                    if !can_match {
-                        break;
-                    }
+    /// Number of bid price levels.
+    #[inline]
+    pub fn bid_levels(&self) -> usize {
+        self.bids.len()
+    }
 
-                    // Match against all orders at this price level FIFO.
-                    if let Some(ask_orders) = self.asks.get_mut(&best_ask_price) {
-                        while order.remaining_qty > 0 && !ask_orders.is_empty() {
-                            // Safe: we only hold a mutable borrow of ask_orders.
-                            if let Some(passive_order) = ask_orders.front_mut() {
-                                let trade_qty = order.remaining_qty.min(passive_order.remaining_qty);
+    /// Number of ask price levels.
+    #[inline]
+    pub fn ask_levels(&self) -> usize {
+        self.asks.len()
+    }
 
-                                // Trade price is passive (best_ask_price).
-                                outputs.push(OutputMessage::trade(
-                                    self.symbol.clone(),
-                                    order.user_id,
-                                    order.user_order_id,
-                                    passive_order.user_id,
-                                    passive_order.user_order_id,
-                                    best_ask_price,
-                                    trade_qty,
-                                ));
+    // =========================================================================
+    // Internal Methods
+    // =========================================================================
 
-                                order.fill(trade_qty);
-                                passive_order.fill(trade_qty);
+    /// Match an incoming order against the opposing side.
+    fn match_order(&mut self, order: &mut Order, outputs: &mut Vec<OutputMessage>) {
+        debug_assert!(order.remaining_qty > 0, "matching fully filled order");
 
-                                if passive_order.is_filled() {
-                                    ask_orders.pop_front();
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
+        let opposing_side = match order.side {
+            Side::Buy => &mut self.asks,
+            Side::Sell => &mut self.bids,
+        };
 
-                    // Remove empty price level.
-                    if let Some(ask_orders) = self.asks.get(&best_ask_price) {
-                        if ask_orders.is_empty() {
-                            self.asks.remove(&best_ask_price);
-                        }
-                    }
+        let mut iterations = 0;
+
+        // Bounded loop (Power of Ten Rule 2)
+        while iterations < MAX_MATCH_ITERATIONS {
+            iterations += 1;
+
+            if order.remaining_qty == 0 || opposing_side.is_empty() {
+                break;
+            }
+
+            let best_price = opposing_side[0].price;
+
+            // Check if we can match at this price
+            if !order.can_match(best_price) {
+                break;
+            }
+
+            // Match against orders at this level (FIFO)
+            let level = &mut opposing_side[0];
+            
+            let mut order_idx = 0;
+            let mut inner_iterations = 0;
+
+            while inner_iterations < MAX_ORDERS_PER_LEVEL {
+                inner_iterations += 1;
+
+                if order.remaining_qty == 0 || order_idx >= level.orders.len() {
+                    break;
+                }
+
+                let passive = &mut level.orders[order_idx];
+                let trade_qty = order.remaining_qty.min(passive.remaining_qty);
+
+                debug_assert!(trade_qty > 0, "zero trade quantity");
+
+                // Emit trade (buyer always first in output)
+                let (buyer_id, buyer_oid, seller_id, seller_oid) = match order.side {
+                    Side::Buy => (
+                        order.user_id,
+                        order.user_order_id,
+                        passive.user_id,
+                        passive.user_order_id,
+                    ),
+                    Side::Sell => (
+                        passive.user_id,
+                        passive.user_order_id,
+                        order.user_id,
+                        order.user_order_id,
+                    ),
+                };
+
+                outputs.push(OutputMessage::trade(
+                    self.symbol,
+                    buyer_id,
+                    buyer_oid,
+                    seller_id,
+                    seller_oid,
+                    best_price,
+                    trade_qty,
+                ));
+
+                order.fill(trade_qty);
+                passive.fill(trade_qty);
+
+                if passive.is_filled() {
+                    order_idx += 1;
                 }
             }
-            Side::Sell => {
-                // Sell order: match against bids (descending price).
-                loop {
-                    if order.remaining_qty == 0 || self.bids.is_empty() {
-                        break;
-                    }
 
-                    // Best bid is the highest key.
-                    let best_bid_price_opt = self.bids.keys().next_back().copied();
-                    let best_bid_price = match best_bid_price_opt {
-                        Some(p) => p,
-                        None => break,
-                    };
+            debug_assert!(
+                inner_iterations < MAX_ORDERS_PER_LEVEL,
+                "exceeded max orders per level"
+            );
 
-                    let can_match = match order.order_type {
-                        OrderType::Market => true,
-                        OrderType::Limit => order.price <= best_bid_price,
-                    };
-                    if !can_match {
-                        break;
-                    }
+            // Remove filled orders from front
+            let filled_count = level.orders.iter().take_while(|o| o.is_filled()).count();
+            if filled_count > 0 {
+                level.orders.drain(0..filled_count);
+            }
 
-                    if let Some(bid_orders) = self.bids.get_mut(&best_bid_price) {
-                        while order.remaining_qty > 0 && !bid_orders.is_empty() {
-                            if let Some(passive_order) = bid_orders.front_mut() {
-                                let trade_qty = order.remaining_qty.min(passive_order.remaining_qty);
-
-                                // Trade price is passive (best_bid_price).
-                                outputs.push(OutputMessage::trade(
-                                    self.symbol.clone(),
-                                    passive_order.user_id,
-                                    passive_order.user_order_id,
-                                    order.user_id,
-                                    order.user_order_id,
-                                    best_bid_price,
-                                    trade_qty,
-                                ));
-
-                                order.fill(trade_qty);
-                                passive_order.fill(trade_qty);
-
-                                if passive_order.is_filled() {
-                                    bid_orders.pop_front();
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(bid_orders) = self.bids.get(&best_bid_price) {
-                        if bid_orders.is_empty() {
-                            self.bids.remove(&best_bid_price);
-                        }
-                    }
-                }
+            // Remove empty price level
+            if level.is_empty() {
+                opposing_side.remove(0);
             }
         }
 
-        outputs
+        debug_assert!(
+            iterations < MAX_MATCH_ITERATIONS,
+            "exceeded max match iterations"
+        );
     }
 
-    /// Add a remaining limit order to the appropriate side of the book.
+    /// Add a limit order to the appropriate side.
     fn add_to_book(&mut self, order: Order) {
-        match order.side {
-            Side::Buy => {
-                let entry = self.bids.entry(order.price).or_insert_with(VecDeque::new);
-                entry.push_back(order);
-            }
-            Side::Sell => {
-                let entry = self.asks.entry(order.price).or_insert_with(VecDeque::new);
-                entry.push_back(order);
-            }
+        debug_assert!(order.remaining_qty > 0, "adding filled order to book");
+        debug_assert!(order.order_type == OrderType::Limit, "adding market order to book");
+        debug_assert!(order.price > 0, "limit order with zero price");
+
+        let (levels, descending) = match order.side {
+            Side::Buy => (&mut self.bids, true),   // Bids: high to low
+            Side::Sell => (&mut self.asks, false), // Asks: low to high
+        };
+
+        // Find insertion point (binary search)
+        let pos = if descending {
+            // Descending: find first price < order.price
+            levels
+                .iter()
+                .position(|l| l.price < order.price)
+                .unwrap_or(levels.len())
+        } else {
+            // Ascending: find first price > order.price
+            levels
+                .iter()
+                .position(|l| l.price > order.price)
+                .unwrap_or(levels.len())
+        };
+
+        // Check if we have a level at this price
+        if pos < levels.len() && levels[pos].price == order.price {
+            // Append to existing level (time priority)
+            levels[pos].orders.push(order);
+        } else if pos > 0 && levels[pos - 1].price == order.price {
+            // Check previous position too (edge case in binary search)
+            levels[pos - 1].orders.push(order);
+        } else {
+            // Insert new level
+            debug_assert!(
+                levels.len() < MAX_PRICE_LEVELS,
+                "exceeded max price levels"
+            );
+            let mut level = PriceLevel::new(order.price);
+            level.orders.push(order);
+            levels.insert(pos, level);
         }
     }
 
-    /// Check for top-of-book changes and emit appropriate events.
-    fn check_top_of_book_changes(&mut self) -> Vec<OutputMessage> {
-        let mut outputs = Vec::new();
-
-        let current_best_bid_price = self.best_bid_price();
-        let current_best_bid_qty = self.best_bid_quantity();
-        let current_best_ask_price = self.best_ask_price();
-        let current_best_ask_qty = self.best_ask_quantity();
-
-        // Bid side changes.
-        if current_best_bid_price != self.prev_best_bid_price
-            || current_best_bid_qty != self.prev_best_bid_qty
-        {
-            if current_best_bid_price == 0 {
-                outputs.push(OutputMessage::top_of_book_eliminated(
-                    self.symbol.clone(),
-                    Side::Buy,
-                ));
-            } else {
-                outputs.push(OutputMessage::top_of_book(
-                    self.symbol.clone(),
-                    Side::Buy,
-                    current_best_bid_price,
-                    current_best_bid_qty,
-                ));
-            }
-
-            self.prev_best_bid_price = current_best_bid_price;
-            self.prev_best_bid_qty = current_best_bid_qty;
+    /// Remove an order by (user_id, user_order_id). Returns true if found.
+    fn remove_order(&mut self, user_id: u32, user_order_id: u32) -> bool {
+        // Try bids first
+        if Self::remove_from_side(&mut self.bids, user_id, user_order_id) {
+            return true;
         }
-
-        // Ask side changes.
-        if current_best_ask_price != self.prev_best_ask_price
-            || current_best_ask_qty != self.prev_best_ask_qty
-        {
-            if current_best_ask_price == 0 {
-                outputs.push(OutputMessage::top_of_book_eliminated(
-                    self.symbol.clone(),
-                    Side::Sell,
-                ));
-            } else {
-                outputs.push(OutputMessage::top_of_book(
-                    self.symbol.clone(),
-                    Side::Sell,
-                    current_best_ask_price,
-                    current_best_ask_qty,
-                ));
-            }
-
-            self.prev_best_ask_price = current_best_ask_price;
-            self.prev_best_ask_qty = current_best_ask_qty;
-        }
-
-        outputs
+        // Then asks
+        Self::remove_from_side(&mut self.asks, user_id, user_order_id)
     }
 
-    /// Sum of remaining_qty across all orders at one price level.
-    fn total_quantity_at_price(orders: &VecDeque<Order>) -> u32 {
-        orders.iter().map(|o| o.remaining_qty).sum()
+    /// Remove from a specific side. Returns true if found.
+    fn remove_from_side(
+        levels: &mut Vec<PriceLevel>,
+        user_id: u32,
+        user_order_id: u32,
+    ) -> bool {
+        for level_idx in 0..levels.len() {
+            let level = &mut levels[level_idx];
+            
+            // Find order in this level
+            if let Some(order_idx) = level
+                .orders
+                .iter()
+                .position(|o| o.user_id == user_id && o.user_order_id == user_order_id)
+            {
+                level.orders.remove(order_idx);
+                
+                // Remove empty level
+                if level.is_empty() {
+                    levels.remove(level_idx);
+                }
+                
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Emit top-of-book changes if state has changed.
+    fn emit_tob_changes(&mut self, outputs: &mut Vec<OutputMessage>) {
+        let current = self.top_of_book();
+
+        // Bid side
+        if current.bid_price != self.prev_tob.bid_price
+            || current.bid_quantity != self.prev_tob.bid_quantity
+        {
+            if current.bid_price == 0 {
+                outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Buy));
+            } else {
+                outputs.push(OutputMessage::top_of_book(
+                    self.symbol,
+                    Side::Buy,
+                    current.bid_price,
+                    current.bid_quantity,
+                ));
+            }
+        }
+
+        // Ask side
+        if current.ask_price != self.prev_tob.ask_price
+            || current.ask_quantity != self.prev_tob.ask_quantity
+        {
+            if current.ask_price == 0 {
+                outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Sell));
+            } else {
+                outputs.push(OutputMessage::top_of_book(
+                    self.symbol,
+                    Side::Sell,
+                    current.ask_price,
+                    current.ask_quantity,
+                ));
+            }
+        }
+
+        self.prev_tob = current;
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_order(user_id: u32, user_order_id: u32, price: u32, qty: u32, side: Side) -> NewOrder {
+        NewOrder::new(user_id, user_order_id, Symbol::from_str("TEST"), price, qty, side)
+    }
+
+    #[test]
+    fn test_add_single_bid() {
+        let mut book = OrderBook::new(Symbol::from_str("TEST"));
+        let mut outputs = Vec::new();
+
+        let order = make_order(1, 100, 1000, 10, Side::Buy);
+        book.add_order(&order, 0, &mut outputs);
+
+        assert_eq!(book.best_bid_price(), 1000);
+        assert_eq!(book.best_bid_quantity(), 10);
+        assert_eq!(book.best_ask_price(), 0);
+        
+        // Should have: Ack + TOB update
+        assert!(outputs.len() >= 2);
+    }
+
+    #[test]
+    fn test_match_simple() {
+        let mut book = OrderBook::new(Symbol::from_str("TEST"));
+        let mut outputs = Vec::new();
+
+        // Add resting bid
+        let bid = make_order(1, 1, 100, 10, Side::Buy);
+        book.add_order(&bid, 0, &mut outputs);
+        outputs.clear();
+
+        // Incoming sell should match
+        let ask = make_order(2, 1, 100, 10, Side::Sell);
+        book.add_order(&ask, 1, &mut outputs);
+
+        // Find the trade
+        let trade = outputs.iter().find(|m| matches!(m, OutputMessage::Trade(_)));
+        assert!(trade.is_some());
+
+        if let Some(OutputMessage::Trade(t)) = trade {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.quantity, 10);
+            assert_eq!(t.user_id_buy, 1);
+            assert_eq!(t.user_id_sell, 2);
+        }
+
+        // Book should be empty
+        assert_eq!(book.best_bid_price(), 0);
+        assert_eq!(book.best_ask_price(), 0);
+    }
+
+    #[test]
+    fn test_partial_fill() {
+        let mut book = OrderBook::new(Symbol::from_str("TEST"));
+        let mut outputs = Vec::new();
+
+        // Add resting bid for 100
+        let bid = make_order(1, 1, 100, 100, Side::Buy);
+        book.add_order(&bid, 0, &mut outputs);
+        outputs.clear();
+
+        // Sell only 30
+        let ask = make_order(2, 1, 100, 30, Side::Sell);
+        book.add_order(&ask, 1, &mut outputs);
+
+        // Should have partial fill, 70 remaining
+        assert_eq!(book.best_bid_quantity(), 70);
+    }
+
+    #[test]
+    fn test_price_time_priority() {
+        let mut book = OrderBook::new(Symbol::from_str("TEST"));
+        let mut outputs = Vec::new();
+
+        // Add two bids at same price
+        let bid1 = make_order(1, 1, 100, 10, Side::Buy);
+        let bid2 = make_order(2, 1, 100, 10, Side::Buy);
+        book.add_order(&bid1, 0, &mut outputs);
+        book.add_order(&bid2, 1, &mut outputs);
+        outputs.clear();
+
+        // Sell should match first bid (time priority)
+        let ask = make_order(3, 1, 100, 10, Side::Sell);
+        book.add_order(&ask, 2, &mut outputs);
+
+        let trade = outputs.iter().find_map(|m| {
+            if let OutputMessage::Trade(t) = m { Some(t) } else { None }
+        });
+
+        assert!(trade.is_some());
+        assert_eq!(trade.unwrap().user_id_buy, 1); // First bid
+    }
+
+    #[test]
+    fn test_cancel() {
+        let mut book = OrderBook::new(Symbol::from_str("TEST"));
+        let mut outputs = Vec::new();
+
+        let bid = make_order(1, 100, 100, 10, Side::Buy);
+        book.add_order(&bid, 0, &mut outputs);
+        outputs.clear();
+
+        let found = book.cancel_order(1, 100, &mut outputs);
+        assert!(found);
+        assert_eq!(book.best_bid_price(), 0);
+        
+        // Should have CancelAck
+        assert!(outputs.iter().any(|m| matches!(m, OutputMessage::CancelAck(_))));
+    }
+}

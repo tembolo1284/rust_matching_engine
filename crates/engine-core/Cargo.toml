@@ -2,14 +2,38 @@
 name = "engine-core"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-description = "Pure matching engine core: order book, matching engine, messages."
+authors = ["Paul Lopez"]
+description = "High-performance matching engine core"
+keywords = ["trading", "matching-engine", "hft", "low-latency"]
+categories = ["algorithms", "finance"]
 
 [dependencies]
-# Used for timestamps
-tokio = { version = "1.36", features = ["macros", "rt", "time"] }
+# No dependencies for core - keep it minimal
 
 [dev-dependencies]
-engine-protocol = { path = "../engine-protocol" }
+criterion = "0.5"
 
-# This needs to be pure logic, and no networking, no protocol dependencies.
+[[bench]]
+name = "matching"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[lints.rust]
+warnings = "deny"
+missing_docs = "deny"
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"
+nursery = "warn"

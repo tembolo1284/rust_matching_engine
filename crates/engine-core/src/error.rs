@@ -1,23 +1,74 @@
-//! Error types for the core matching engine.
+//! Error types for the matching engine.
 //!
-//! Right now the core engine API is designed to be infallible for
-//! normal operations (invalid input should generally be filtered out
-//! at the parsing / protocol layer).
+//! The core engine is designed to be infallible for normal operations.
+//! Invalid input should be filtered at the protocol layer.
 //!
-//! This module is a placeholder for future extensions where you might
-//! want to return rich errors from certain admin operations.
+//! These errors are for exceptional conditions and admin operations.
 
-/// Placeholder error type for the engine.
+use crate::symbol::Symbol;
+
+/// Engine error type.
 ///
-/// Currently unused, but kept for future-proofing in case we add
-/// admin APIs (e.g. “drop symbol”, “replay snapshot”, etc.) that
-/// can fail for well-defined reasons.
-#[derive(Debug)]
+/// Uses `Symbol` instead of `String` to avoid heap allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineError {
     /// The requested symbol does not exist.
-    UnknownSymbol(String),
+    UnknownSymbol(Symbol),
 
-    /// A generic internal error (e.g. invariant violation).
-    Internal(String),
+    /// Order not found for cancel.
+    OrderNotFound {
+        user_id: u32,
+        user_order_id: u32,
+    },
+
+    /// Capacity exceeded (e.g., max orders, max symbols).
+    CapacityExceeded,
+
+    /// Invalid price (e.g., zero price for limit order).
+    InvalidPrice,
+
+    /// Invalid quantity (e.g., zero quantity).
+    InvalidQuantity,
 }
 
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::UnknownSymbol(sym) => {
+                write!(f, "unknown symbol: {}", sym)
+            }
+            EngineError::OrderNotFound { user_id, user_order_id } => {
+                write!(f, "order not found: user_id={}, user_order_id={}", user_id, user_order_id)
+            }
+            EngineError::CapacityExceeded => {
+                write!(f, "capacity exceeded")
+            }
+            EngineError::InvalidPrice => {
+                write!(f, "invalid price")
+            }
+            EngineError::InvalidQuantity => {
+                write!(f, "invalid quantity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_is_copy() {
+        let err = EngineError::UnknownSymbol(Symbol::from_str("IBM"));
+        let err2 = err; // Copy
+        assert_eq!(err, err2);
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = EngineError::UnknownSymbol(Symbol::from_str("AAPL"));
+        assert_eq!(format!("{}", err), "unknown symbol: AAPL");
+    }
+}
