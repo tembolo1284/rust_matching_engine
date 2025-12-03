@@ -19,18 +19,21 @@ use crate::types::{ClientId, ClientRegistry, EngineRequest};
 /// Maximum number of port retries before giving up.
 const MAX_PORT_RETRIES: u16 = 10;
 
+// Port increment for TCP retry (avoid stepping on UDP ports).
+const TCP_PORT_INCREMENT: u16 = 10;
+
 /// Bind a TCP listener with automatic port retry on AddrInUse.
 async fn bind_tcp_with_retry(
     bind_addr: &str,
     base_port: u16,
 ) -> Result<(TcpListener, u16), std::io::Error> {
-    for offset in 0..MAX_PORT_RETRIES {
-        let port = base_port + offset;
+    for attempt in 0..MAX_PORT_RETRIES {
+        let port = base_port + (attempt * TCP_PORT_INCREMENT);
         let addr = format!("{}:{}", bind_addr, port);
 
         match TcpListener::bind(&addr).await {
             Ok(listener) => {
-                if offset > 0 {
+                if attempt > 0 {
                     eprintln!(
                         "Note: TCP port {} was in use, bound to {} instead",
                         base_port, port
