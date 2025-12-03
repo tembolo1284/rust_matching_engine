@@ -1,6 +1,6 @@
 //! Application state and logic.
 
-use chrono::{DateTime, Local};
+use chrono::Local;
 use engine_core::{Cancel, InputMessage, NewOrder, OutputMessage, Side, Symbol};
 use indexmap::IndexMap;
 use std::collections::VecDeque;

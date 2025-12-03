@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use engine_core::{InputMessage, OutputMessage, Symbol};
-use engine_protocol::{binary_codec, csv_codec, fix_codec};
+use engine_protocol::{binary_codec, fix_codec};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -24,7 +24,7 @@ pub enum NetworkEvent {
     Disconnected,
     Message(OutputMessage),
     Error(String),
-    LatencySample { order_id: u32, latency_us: u64 },
+    LatencySample { _order_id: u32, latency_us: u64 },
 }
 
 /// Engine connection with auto-protocol support.
@@ -35,7 +35,7 @@ pub struct EngineConnection {
     tcp_stream: Option<TcpStream>,
     udp_socket: Option<UdpSocket>,
     event_tx: Sender<NetworkEvent>,
-    read_buffer: BytesMut,
+    _read_buffer: BytesMut,
     write_buffer: BytesMut,
     pending_orders: Arc<RwLock<HashMap<u32, Instant>>>,
 }

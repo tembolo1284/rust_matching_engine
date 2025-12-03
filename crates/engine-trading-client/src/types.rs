@@ -52,6 +52,7 @@ pub struct Order {
 
 /// Order status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OrderStatus {
     Pending,
     Open,
@@ -104,6 +105,7 @@ pub struct OrderBookState {
 
 /// Load test scenario configuration.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LoadTestScenario {
     pub name: String,
     pub total_orders: u64,
@@ -213,6 +215,7 @@ impl LoadTestScenario {
 
 /// Load test statistics.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct LoadTestStats {
     pub orders_sent: u64,
     pub acks_received: u64,
@@ -289,6 +292,7 @@ impl LoadTestStats {
 }
 
 /// Format a number with K/M suffixes for readability.
+#[allow(dead_code)]
 fn format_number(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)

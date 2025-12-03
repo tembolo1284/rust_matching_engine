@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::protocol_detect::detect_protocol;
 use crate::types::{
-    ClientId, ClientInfo, ClientRegistry, EngineRequest, EngineTx, OutboundRx, Protocol, Transport,
+    ClientId, ClientInfo, ClientRegistry, EngineRequest, EngineTx, Protocol, Transport,
 };
 
 /// Handle a single TCP client connection.

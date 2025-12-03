@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use engine_core::{InputMessage, NewOrder, Side, Symbol};
+use engine_core::{InputMessage, NewOrder, Side};
 use rand::prelude::*;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
