@@ -5,7 +5,7 @@
 //!   $ cargo run -p engine-server
 //!
 //!   # terminal 2 (client):
-//!   $ ENGINE_CLIENT_ADDR=127.0.0.1:9001 cargo run -p engine-server --example tcp_client
+//!   $ ENGINE_CLIENT_ADDR=127.0.0.1:9000 cargo run -p engine-server --example tcp_client
 //!
 //! Then type lines like:
 //!   N, 1, AAPL, 100, 10, B, 1
@@ -22,7 +22,7 @@ use std::error::Error;
 use engine_core::OutputMessage;
 use engine_protocol::{
     csv_codec::{format_output_csv, parse_input_line},
-    decode_output, encode_input,
+    BinaryDecoder, BinaryEncoder,
 };
 use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -44,6 +44,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Continuously read frames: [len: u32 BE][payload bytes],
     // decode OutputMessage and print as CSV.
     let reader_task = tokio::spawn(async move {
+        let mut decoder = BinaryDecoder::new();
+
         loop {
             // Read length prefix
             let mut len_buf = [0u8; 4];
@@ -64,14 +66,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 break;
             }
 
-            // Decode OutputMessage
-            match decode_output(&payload) {
+            // Decode OutputMessage using BinaryDecoder
+            match decoder.decode_output(&payload) {
                 Ok(msg) => {
                     print_engine_output(&msg);
                 }
                 Err(e) => {
                     eprintln!("[client] decode_output error: {:?}", e);
-                    // Could break, but we just keep going for now.
                 }
             }
         }
@@ -85,6 +86,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let stdin = io::stdin();
     let mut stdin_reader = BufReader::new(stdin);
     let mut line = String::new();
+    let mut encoder = BinaryEncoder::new();
 
     println!("Type CSV commands (e.g. `N, 1, AAPL, 100, 10, B, 1`).");
     println!("Empty line or EOF to exit.\n");
@@ -126,12 +128,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some(m) => m,
         };
 
-        // Encode to binary payload (InputMessage → bytes).
-        let mut payload = Vec::with_capacity(128);
-        if let Err(e) = encode_input(&input_msg, &mut payload) {
-            eprintln!("[client] encode_input error: {:?}", e);
-            continue;
-        }
+        // Encode to binary payload using BinaryEncoder (includes header)
+        let payload = match encoder.encode_input(&input_msg) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[client] encode_input error: {:?}", e);
+                continue;
+            }
+        };
 
         // Send length prefix + payload.
         let len = payload.len() as u32;
@@ -164,4 +168,3 @@ fn print_engine_output(msg: &OutputMessage) {
     let csv = format_output_csv(msg);
     println!("<< {}", csv);
 }
-
