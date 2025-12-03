@@ -11,6 +11,7 @@ use std::sync::Arc;
 /// Returns:
 /// - `unicast_targets`: List of (client_id, message) to send directly.
 /// - `should_multicast`: Whether to publish to multicast.
+#[allow(dead_code)]
 pub async fn route_message(
     msg: &OutputMessage,
     originating_client: ClientId,
@@ -20,13 +21,13 @@ pub async fn route_message(
     let should_multicast: bool;
 
     match msg {
-        OutputMessage::Ack(ack) => {
+        OutputMessage::Ack(_ack) => {
             // Ack goes only to originating client
             unicast.push((originating_client, msg.clone()));
             should_multicast = false;
         }
 
-        OutputMessage::CancelAck(cancel_ack) => {
+        OutputMessage::CancelAck(_cancel_ack) => {
             // CancelAck goes only to originating client
             unicast.push((originating_client, msg.clone()));
             should_multicast = false;

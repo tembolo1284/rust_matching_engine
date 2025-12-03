@@ -28,7 +28,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Min(10),     // Main content
             Constraint::Length(3),   // Status bar
         ])
-        .split(f.area());
+        .split(f.size());
 
     // Draw header
     draw_header(f, chunks[0], app);
@@ -41,7 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Draw help overlay if active
     if app.show_help {
-        draw_help(f, centered_rect(60, 60, f.area()));
+        draw_help(f, centered_rect(60, 60, f.size()));
     }
 }
 

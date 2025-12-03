@@ -19,11 +19,12 @@ use ratatui::{
 };
 use std::{io, time::Duration};
 use tokio::sync::mpsc;
-use tracing::{info};
-use engine_core::{InputMessage, OutputMessage};
+use tracing::info;
+use engine_core::InputMessage;
 
 use crate::app::{App, InputMode};
-use crate::network::EngineConnection;
+use crate::network::{EngineConnection, NetworkEvent};
+use crate::types::{Protocol, Transport};
 
 #[derive(Parser)]
 #[clap(name = "trading-client")]
@@ -41,6 +42,14 @@ struct Cli {
     #[clap(short = 'y', long, default_value = "AAPL")]
     symbol: String,
 
+    /// Transport protocol (tcp or udp)
+    #[clap(short, long, default_value = "tcp")]
+    transport: String,
+
+    /// Message protocol (csv, binary, or fix)
+    #[clap(short, long, default_value = "csv")]
+    protocol: String,
+
     /// Enable debug logging
     #[clap(short, long)]
     debug: bool,
@@ -55,6 +64,18 @@ async fn main() -> Result<()> {
         tracing_subscriber::fmt::init();
     }
 
+    // Parse transport and protocol
+    let transport = match cli.transport.to_lowercase().as_str() {
+        "udp" => Transport::Udp,
+        _ => Transport::Tcp,
+    };
+
+    let protocol = match cli.protocol.to_lowercase().as_str() {
+        "binary" => Protocol::Binary,
+        "fix" => Protocol::Fix,
+        _ => Protocol::Csv,
+    };
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -63,8 +84,10 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run
-    let app = App::new(cli.user_id, &cli.symbol);
-    let res = run_app(&mut terminal, app, &cli.server).await;
+    let mut app = App::new(cli.user_id, &cli.symbol);
+    app.set_connection_info(&cli.server, transport, protocol);
+
+    let res = run_app(&mut terminal, app, &cli.server, transport, protocol).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -86,22 +109,25 @@ async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut app: App,
     server_addr: &str,
+    transport: Transport,
+    protocol: Protocol,
 ) -> Result<()> {
     // Create channels for network communication
-    let (tx_to_network, rx_from_app) = mpsc::unbounded_channel::<InputMessage>();
-    let (tx_to_app, mut rx_from_network) = mpsc::unbounded_channel::<OutputMessage>();
-    
+    // Use bounded channels to match the API
+    let (tx_to_network, rx_from_app) = mpsc::channel::<InputMessage>(1024);
+    let (tx_to_app, mut rx_from_network) = mpsc::channel::<NetworkEvent>(1024);
+
     // Give app the sender to network
-    app.set_network_sender(tx_to_network);
-    
+    app.set_msg_sender(tx_to_network);
+
     // Create network connection
-    let mut connection = EngineConnection::new(server_addr, tx_to_app);
-    
+    let mut connection = EngineConnection::new(server_addr, transport, protocol, tx_to_app);
+
     // Connect to server
     info!("Connecting to {}...", server_addr);
     connection.connect().await?;
     app.set_connected(true);
-    
+
     // Spawn network handler
     let network_handle = tokio::spawn(async move {
         connection.run(rx_from_app).await;
@@ -126,7 +152,7 @@ async fn run_app<B: Backend>(
                         KeyCode::BackTab => {
                             app.prev_panel();
                         }
-                        
+
                         // Order entry hotkeys
                         KeyCode::Char('b') | KeyCode::Char('B') => {
                             app.start_order_entry(engine_core::Side::Buy);
@@ -143,7 +169,7 @@ async fn run_app<B: Backend>(
                         KeyCode::Char('x') | KeyCode::Char('X') => {
                             app.cancel_all_orders();
                         }
-                        
+
                         // Navigation
                         KeyCode::Up | KeyCode::Char('k') => {
                             app.move_selection_up();
@@ -157,12 +183,12 @@ async fn run_app<B: Backend>(
                         KeyCode::Right | KeyCode::Char('l') => {
                             app.move_selection_right();
                         }
-                        
+
                         // Symbol switching
                         KeyCode::Char('/') => {
                             app.start_symbol_search();
                         }
-                        
+
                         // View toggles
                         KeyCode::F(1) => {
                             app.toggle_help();
@@ -173,10 +199,10 @@ async fn run_app<B: Backend>(
                         KeyCode::F(3) => {
                             app.toggle_depth();
                         }
-                        
+
                         _ => {}
                     },
-                    
+
                     InputMode::Editing => match key.code {
                         KeyCode::Enter => {
                             app.submit_input();
@@ -196,9 +222,9 @@ async fn run_app<B: Backend>(
             }
         }
 
-        // Process network messages - FIX: use rx_from_network instead of rx
-        while let Ok(msg) = rx_from_network.try_recv() {
-            app.handle_engine_message(msg);
+        // Process network events
+        while let Ok(event) = rx_from_network.try_recv() {
+            app.handle_network_event(event);
         }
 
         // Check if should quit

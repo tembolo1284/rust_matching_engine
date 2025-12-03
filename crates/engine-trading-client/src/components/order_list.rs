@@ -34,6 +34,7 @@ pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
             OrderStatus::PartiallyFilled => style.fg(Color::Cyan),
             OrderStatus::Filled => style.fg(Color::Green),
             OrderStatus::Cancelled => style.fg(Color::DarkGray),
+            OrderStatus::Rejected => style.fg(Color::Red),
         };
 
         Row::new(vec![

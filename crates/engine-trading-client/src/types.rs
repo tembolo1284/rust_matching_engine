@@ -288,13 +288,12 @@ impl LoadTestStats {
     }
 }
 
+/// Format a number with K/M suffixes for readability.
 fn format_number(n: u64) -> String {
-    if n >= 1_000_000_000 {
-        format!("{:.2}B", n as f64 / 1_000_000_000.0)
-    } else if n >= 1_000_000 {
-        format!("{:.2}M", n as f64 / 1_000_000.0)
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
-        format!("{:.2}K", n as f64 / 1_000.0)
+        format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
     }

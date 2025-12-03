@@ -49,7 +49,7 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_core::{
-    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, TopOfBook, Trade,
+    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, Trade,
 };
 
 // =============================================================================
@@ -160,7 +160,7 @@ mod msg_types {
     pub const NEW_ORDER_SINGLE: &str = "D";
     pub const ORDER_CANCEL_REQUEST: &str = "F";
     pub const EXECUTION_REPORT: &str = "8";
-    pub const ORDER_CANCEL_REJECT: &str = "9";
+    // pub const ORDER_CANCEL_REJECT: &str = "9";
 }
 
 // FIX Side values
@@ -185,7 +185,7 @@ mod fix_exec_type {
 // FIX OrdStatus values
 mod fix_ord_status {
     pub const NEW: char = '0';
-    pub const PARTIALLY_FILLED: char = '1';
+    // pub const PARTIALLY_FILLED: char = '1';
     pub const FILLED: char = '2';
     pub const CANCELED: char = '4';
 }
@@ -495,6 +495,7 @@ impl FixEncoder {
 
 /// FIX message decoder.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FixDecoder {
     version: FixVersion,
 }
