@@ -116,6 +116,7 @@ pub struct LoadTestScenario {
     pub buy_ratio: f64, // 0.5 = 50% buys
 }
 
+#[allow(dead_code)]
 impl LoadTestScenario {
     /// Create predefined scenarios.
     pub fn presets() -> Vec<Self> {
@@ -226,6 +227,7 @@ pub struct LoadTestStats {
     pub latency_histogram: Option<hdrhistogram::Histogram<u64>>,
 }
 
+#[allow(dead_code)]
 impl LoadTestStats {
     pub fn new() -> Self {
         Self {

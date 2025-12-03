@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 
 use engine_core::{InputMessage, OutputMessage};
 use engine_protocol::{binary_codec, csv_codec};
+#[allow(unused_imports)]
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::protocol_detect::detect_protocol;
+use crate::server::bind_udp_with_retry;
 use crate::types::{
     ClientId, ClientInfo, ClientRegistry, EngineRequest, EngineTx, Protocol, Transport,
 };
@@ -31,8 +33,11 @@ pub async fn run_udp_server(
     engine_tx: EngineTx,
     metrics: Arc<Metrics>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let socket = Arc::new(UdpSocket::bind(&config.udp_addr()).await?);
-    eprintln!("UDP server listening on {}", config.udp_addr());
+    let (socket, actual_port) =
+        bind_udp_with_retry(&config.udp_bind_addr, config.udp_port).await?;
+    let socket = Arc::new(socket);
+
+    eprintln!("UDP server listening on {}:{}", config.udp_bind_addr, actual_port);
 
     // Track UDP "clients" by address
     let mut udp_clients: HashMap<SocketAddr, UdpClient> = HashMap::new();

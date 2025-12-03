@@ -18,54 +18,45 @@
 use std::env;
 use std::error::Error;
 
-use engine_core::{InputMessage, TopOfBookQuery};
+use engine_core::{InputMessage, Symbol, TopOfBookQuery};
 use engine_protocol::{decode_output, encode_input};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let symbol = env::args().nth(1).unwrap_or_else(|| "IBM".to_string());
-
+    let symbol_str = env::args().nth(1).unwrap_or_else(|| "IBM".to_string());
+    let symbol = Symbol::from_str(&symbol_str);
     let addr = "127.0.0.1:9000";
-    println!("Connecting to {}", addr);
 
+    println!("Connecting to {}...", addr);
     let mut stream = TcpStream::connect(addr).await?;
-    println!("Connected.");
+    println!("Connected. Querying top-of-book for {}", symbol);
 
-    let query = InputMessage::QueryTopOfBook(TopOfBookQuery { symbol: symbol.clone() });
+    let query = InputMessage::QueryTopOfBook(TopOfBookQuery::new(symbol));
 
     // Encode and send
-    let mut payload = Vec::with_capacity(64);
-    encode_input(&query, &mut payload)?;
+    let mut buf = Vec::new();
+    encode_input(&query, &mut buf)?;
 
-    let len = payload.len() as u32;
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&payload).await?;
+    // Length-prefix for TCP framing
+    let len = (buf.len() as u32).to_be_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(&buf).await?;
     stream.flush().await?;
 
-    println!("--> Sent QueryTopOfBook for symbol '{}'", symbol);
-
-    // Read a couple of responses (bid + ask TOB).
-    for i in 0..2 {
+    // Read responses (expect 2: bid and ask)
+    for _ in 0..2 {
         let mut len_buf = [0u8; 4];
-        if let Err(e) = stream.read_exact(&mut len_buf).await {
-            eprintln!("Read error / EOF: {:?}", e);
-            break;
-        }
-        let frame_len = u32::from_be_bytes(len_buf) as usize;
-        let mut frame = vec![0u8; frame_len];
+        stream.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        let mut frame = vec![0u8; len];
         stream.read_exact(&mut frame).await?;
 
-        match decode_output(&frame) {
-            Ok(msg) => println!("<-- [{}] {:?}", i, msg),
-            Err(err) => {
-                eprintln!("Decode error: {:?}", err);
-                break;
-            }
-        }
+        let msg = decode_output(&frame)?;
+        println!("Response: {:?}", msg);
     }
 
     Ok(())
 }
-

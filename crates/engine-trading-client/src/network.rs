@@ -54,7 +54,7 @@ impl EngineConnection {
             tcp_stream: None,
             udp_socket: None,
             event_tx,
-            read_buffer: BytesMut::with_capacity(65536),
+            _read_buffer: BytesMut::with_capacity(65536),
             write_buffer: BytesMut::with_capacity(65536),
             pending_orders: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -187,7 +187,7 @@ impl EngineConnection {
                                 if let Some(sent_time) = pending.remove(&ack.user_order_id) {
                                     let latency_us = sent_time.elapsed().as_micros() as u64;
                                     let _ = self.event_tx.send(NetworkEvent::LatencySample {
-                                        order_id: ack.user_order_id,
+                                        _order_id: ack.user_order_id,
                                         latency_us,
                                     }).await;
                                 }
