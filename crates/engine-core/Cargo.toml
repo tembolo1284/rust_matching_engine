@@ -12,6 +12,7 @@ categories = ["algorithms", "finance"]
 
 [dev-dependencies]
 criterion = "0.5"
+engine-protocol = { path = "../engine-protocol" }
 
 # Commented out until we create the benchmark file
 # [[bench]]

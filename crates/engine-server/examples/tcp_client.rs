@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Continuously read frames: [len: u32 BE][payload bytes],
     // decode OutputMessage and print as CSV.
     let reader_task = tokio::spawn(async move {
-        let mut decoder = BinaryDecoder::new();
+        let decoder = BinaryDecoder::new();
 
         loop {
             // Read length prefix

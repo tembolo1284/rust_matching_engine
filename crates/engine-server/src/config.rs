@@ -54,17 +54,17 @@ impl Default for Config {
         Config {
             // TCP
             tcp_bind_addr: "0.0.0.0".to_string(),
-            tcp_port: 9000,
+            tcp_port: 1234,
             tcp_enabled: true,
 
             // UDP
             udp_bind_addr: "0.0.0.0".to_string(),
-            udp_port: 9001,
+            udp_port: 1235,
             udp_enabled: true,
 
             // Multicast
             multicast_group: Ipv4Addr::new(239, 255, 0, 1),
-            multicast_port: 9002,
+            multicast_port: 1236,
             multicast_interface: Ipv4Addr::UNSPECIFIED,
             multicast_enabled: true,
             multicast_ttl: 1,
