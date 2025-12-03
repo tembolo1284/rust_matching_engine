@@ -1,14 +1,5 @@
-//! TCP listener and top-level server wiring.
-//!
-//! This module:
-//! - Binds to a TCP address/port (with port bumping on AddrInUse).
-//! - Accepts new connections and assigns `ClientId`s.
-//! - Spawns:
-//!     - a central engine task that owns `MatchingEngine`;
-//!     - a per-client task for TCP I/O.
-//! - Handles Ctrl+C for graceful shutdown and prints a summary.
+//! Main server orchestration.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,187 +7,159 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::client_tcp::handle_tcp_client;
+use crate::client_udp::run_udp_server;
 use crate::config::Config;
-use crate::engine_task;
-use crate::types::{
-    ClientId, ClientRegistry, EngineRx, EngineTx, OutboundRx, OutboundTx,
-};
+use crate::engine_task::run_engine_loop;
+use crate::metrics::Metrics;
+use crate::multicast::run_multicast_publisher;
+use crate::types::{ClientId, ClientRegistry, EngineRequest};
 
-/// Global-ish counter for assigning unique `ClientId`s.
-static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_client_id() -> ClientId {
-    ClientId(NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed))
-}
-
-/// Try to bind a TCP listener, with simple "port bumping" on AddrInUse.
-///
-/// Tries up to 3 ports: `port`, `port+1`, `port+2`.
-async fn bind_with_port_bump(bind_addr: String, mut port: u16) -> std::io::Result<(TcpListener, String, u16, u8)> {
-    let mut attempts: u8 = 0;
-
-    loop {
-        attempts += 1;
-        let addr_string = format!("{}:{}", bind_addr, port);
-        match TcpListener::bind(&addr_string).await {
-            Ok(listener) => {
-                return Ok((listener, bind_addr, port, attempts));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < 3 => {
-                eprintln!(
-                    "Port {} is already in use on {} (attempt {}/3), trying {}...",
-                    port,
-                    bind_addr,
-                    attempts,
-                    port + 1
-                );
-                port = port + 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// Run the TCP server with the given configuration.
+/// Run the server with the given configuration.
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // Try to bind listener with port bumping.
-    let (listener, bind_addr, bound_port, attempts) =
-        bind_with_port_bump(config.bind_addr.clone(), config.port).await?;
+    let config = Arc::new(config);
+    let metrics = Arc::new(Metrics::new());
+    let clients = Arc::new(ClientRegistry::new());
 
-    // Shared registry of clients → outbound channels.
-    let clients: ClientRegistry = Arc::new(tokio::sync::RwLock::new(Default::default()));
+    // Print banner
+    print_banner(&config);
 
-    // Channel from clients → engine task.
-    let (engine_tx, engine_rx): (EngineTx, EngineRx) = mpsc::unbounded_channel();
+    // Create bounded engine channel
+    let (engine_tx, engine_rx) = mpsc::channel::<EngineRequest>(config.engine_channel_capacity);
 
-    // Spawn the central engine task.
+    // Create multicast channel if enabled
+    let multicast_tx = if config.multicast_enabled {
+        let (tx, rx) = mpsc::channel(config.multicast_channel_capacity);
+        
+        // Spawn multicast publisher
+        let mcast_config = config.clone();
+        let mcast_metrics = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_multicast_publisher(mcast_config, rx, mcast_metrics).await {
+                eprintln!("Multicast publisher error: {}", e);
+            }
+        });
+        
+        Some(tx)
+    } else {
+        None
+    };
+
+    // Spawn engine task
     {
         let clients_clone = clients.clone();
+        let metrics_clone = metrics.clone();
         tokio::spawn(async move {
-            engine_task::run_engine_loop(engine_rx, clients_clone).await;
+            run_engine_loop(engine_rx, clients_clone, multicast_tx, metrics_clone).await;
         });
     }
 
-    // Pretty banner (Rust version of your C++ startup logs).
-    eprintln!("==============================================================");
-    eprintln!("Order Book - TCP Matching Engine");
-    eprintln!("==============================================================");
-    eprintln!("Bind address: {}", bind_addr);
-    eprintln!("TCP Port:     {}", bound_port);
-    eprintln!("Max clients:  {}", config.max_clients);
-    if attempts > 1 {
-        eprintln!(
-            "Note: bound after {} attempts (port bumped due to AddrInUse).",
-            attempts
-        );
+    // Spawn UDP server if enabled
+    if config.udp_enabled {
+        let udp_config = config.clone();
+        let udp_clients = clients.clone();
+        let udp_engine_tx = engine_tx.clone();
+        let udp_metrics = metrics.clone();
+        
+        tokio::spawn(async move {
+            if let Err(e) = run_udp_server(udp_config, udp_clients, udp_engine_tx, udp_metrics).await {
+                eprintln!("UDP server error: {}", e);
+            }
+        });
     }
-    eprintln!("==============================================================");
-    eprintln!("Queue Configuration:");
-    eprintln!("  Engine request queue:  Tokio mpsc::unbounded_channel()");
-    eprintln!("  Client outbound queues: Tokio mpsc::unbounded_channel() per client");
-    eprintln!("==============================================================");
-    eprintln!("Starting tasks...");
-    eprintln!("  Engine task: started");
-    eprintln!(
-        "  TCP listener: starting on {}:{}",
-        bind_addr, bound_port
-    );
-    eprintln!("==============================================================");
-    eprintln!(
-        "TCP listener ready on {}:{} (press Ctrl+C to shutdown gracefully)",
-        bind_addr, bound_port
-    );
+
+    // Run TCP server if enabled
+    if config.tcp_enabled {
+        run_tcp_server(config.clone(), clients.clone(), engine_tx.clone(), metrics.clone()).await?;
+    } else {
+        // Just wait for shutdown signal
+        tokio::signal::ctrl_c().await?;
+    }
+
+    // Shutdown
+    eprintln!("\n==============================================================");
+    eprintln!("Shutting down...");
     eprintln!("==============================================================");
 
-    // Main accept loop + Ctrl+C handling.
-    let listener = Arc::new(listener);
+    // Print metrics
+    metrics.print_summary();
+
+    // Give tasks time to finish
+    time::sleep(Duration::from_millis(100)).await;
+
+    eprintln!("Goodbye!");
+    Ok(())
+}
+
+async fn run_tcp_server(
+    config: Arc<Config>,
+    clients: Arc<ClientRegistry>,
+    engine_tx: mpsc::Sender<EngineRequest>,
+    metrics: Arc<Metrics>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind(&config.tcp_addr()).await?;
+    eprintln!("TCP server listening on {}", config.tcp_addr());
 
     loop {
         tokio::select! {
-            // Accept new clients.
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, peer_addr)) => {
-                        let current_clients = {
-                            let guard = clients.read().await;
-                            guard.len()
-                        };
-
-                        if current_clients >= config.max_clients {
-                            eprintln!(
-                                "Rejecting connection from {}: max_clients ({}) reached",
-                                peer_addr, config.max_clients
-                            );
+                        let current_count = clients.client_count().await;
+                        
+                        if current_count >= config.max_tcp_clients {
+                            eprintln!("Rejecting {}: max clients reached", peer_addr);
                             continue;
                         }
 
-                        let client_id = next_client_id();
-                        eprintln!("Accepted connection {} from {}", client_id.0, peer_addr);
-
-                        // Outbound channel for this client.
-                        let (out_tx, out_rx): (OutboundTx, OutboundRx) = mpsc::unbounded_channel();
-
-                        // Register client.
-                        {
-                            let mut guard = clients.write().await;
-                            guard.insert(client_id, out_tx.clone());
-                        }
-
-                        let clients_clone = clients.clone();
-                        let engine_tx_clone = engine_tx.clone();
+                        let client_id = ClientId::next();
+                        let cfg = config.clone();
+                        let cli = clients.clone();
+                        let eng = engine_tx.clone();
+                        let met = metrics.clone();
 
                         tokio::spawn(async move {
-                            if let Err(e) = crate::client::run_client(
-                                client_id,
-                                stream,
-                                engine_tx_clone,
-                                out_rx,
-                                clients_clone,
-                            )
-                            .await
-                            {
-                                eprintln!("Client {} error: {:?}", client_id.0, e);
-                            } else {
-                                eprintln!("Client {} disconnected", client_id.0);
-                            }
+                            handle_tcp_client(client_id, stream, cfg, cli, eng, met).await;
                         });
                     }
                     Err(e) => {
-                        eprintln!("Listener accept error: {:?}", e);
-                        // Small delay before retrying accept.
-                        time::sleep(Duration::from_millis(50)).await;
+                        eprintln!("Accept error: {}", e);
+                        time::sleep(Duration::from_millis(10)).await;
                     }
                 }
             }
-
-            // Handle Ctrl+C for graceful shutdown.
+            
             _ = tokio::signal::ctrl_c() => {
-                eprintln!();
-                eprintln!("==============================================================");
-                eprintln!("Ctrl+C received, initiating graceful shutdown...");
-                eprintln!("==============================================================");
                 break;
             }
         }
     }
 
-    // Drop engine_tx so engine loop can finish and print stats.
-    drop(engine_tx);
-
-    // Give clients a moment to drain outbound messages and disconnect.
-    {
-        let mut guard = clients.write().await;
-        guard.clear();
-    }
-
-    eprintln!("Waiting briefly for engine task to finish...");
-    // Not strictly necessary, but a small delay helps in practice.
-    time::sleep(Duration::from_millis(200)).await;
-
-    eprintln!("==============================================================");
-    eprintln!("Shutdown complete. Goodbye!");
-    eprintln!("==============================================================");
-
     Ok(())
 }
 
+fn print_banner(config: &Config) {
+    eprintln!("==============================================================");
+    eprintln!("         Matching Engine Server v0.2.0");
+    eprintln!("==============================================================");
+    eprintln!();
+    eprintln!("Transports:");
+    if config.tcp_enabled {
+        eprintln!("  TCP:       {} (CSV, Binary, FIX)", config.tcp_addr());
+    }
+    if config.udp_enabled {
+        eprintln!("  UDP:       {} (CSV, Binary)", config.udp_addr());
+    }
+    if config.multicast_enabled {
+        eprintln!("  Multicast: {}:{} (Binary)", config.multicast_group, config.multicast_port);
+    }
+    eprintln!();
+    eprintln!("Limits:");
+    eprintln!("  Max TCP clients:    {}", config.max_tcp_clients);
+    eprintln!("  Engine queue:       {}", config.engine_channel_capacity);
+    eprintln!("  Client queue:       {}", config.client_channel_capacity);
+    eprintln!();
+    eprintln!("==============================================================");
+    eprintln!("Ready. Press Ctrl+C to shutdown.");
+    eprintln!("==============================================================");
+}

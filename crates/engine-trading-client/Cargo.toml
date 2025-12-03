@@ -1,8 +1,8 @@
-# crates/engine-trading-client/Cargo.toml
 [package]
 name = "engine-trading-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Professional trading terminal with auto-discovery and load testing"
 
 [dependencies]
 # Core dependencies
@@ -21,13 +21,7 @@ futures = "0.3"
 bytes = "1.5"
 
 # Data structures
-dashmap = "5.5"
 indexmap = "2.1"
-
-# Configuration
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
 
 # Error handling
 anyhow = "1.0"
@@ -43,5 +37,16 @@ chrono = "0.4"
 # CLI args
 clap = { version = "4", features = ["derive"] }
 
-# Optional clipboard support
-copypasta = "0.10"
+# Random data generation for load tests
+rand = "0.8"
+
+# Statistics
+hdrhistogram = "7.5"
+
+[[bin]]
+name = "trading-client"
+path = "src/main.rs"
+
+[[bin]]
+name = "load-test"
+path = "src/bin/load_test.rs"
