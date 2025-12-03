@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_new_order_size() {
-        assert_eq!(std::mem::size_of::<NewOrder>(), 32);
+        assert_eq!(std::mem::size_of::<NewOrder>(), 28);
     }
 
     #[test]
@@ -365,12 +365,12 @@ mod tests {
 
     #[test]
     fn test_trade_size() {
-        assert_eq!(std::mem::size_of::<Trade>(), 40);
+        assert_eq!(std::mem::size_of::<Trade>(), 32);
     }
 
     #[test]
     fn test_top_of_book_size() {
-        assert_eq!(std::mem::size_of::<TopOfBook>(), 24);
+        assert_eq!(std::mem::size_of::<TopOfBook>(), 20);
     }
 
     #[test]

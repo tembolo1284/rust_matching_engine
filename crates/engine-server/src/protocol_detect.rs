@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_detect_binary() {
-        assert_eq!(detect_protocol(b"MENG\x01\x00"), Protocol::Binary);
+        assert_eq!(detect_protocol(&[0xBE, 0xEF, 0x01, 0x00]), Protocol::Binary);
     }
 
     #[test]

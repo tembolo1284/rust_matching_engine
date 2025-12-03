@@ -17,7 +17,7 @@ pub const PROTOCOL_VERSION: u8 = 1;
 ///
 /// Binary protocol frames start with these bytes to distinguish
 /// from CSV (which starts with printable ASCII like 'N', 'C', 'F').
-pub const MAGIC_BYTES: [u8; 2] = [0xBE, 0xEF];
+pub const MAGIC_BYTES: [u8; 4] = *b"MENG";
 
 /// Input message types (client → server).
 ///
