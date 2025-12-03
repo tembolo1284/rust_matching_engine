@@ -7,7 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, OrderStatus};
+use crate::app::App;
+use crate::types::OrderStatus;
 use engine_core::Side;
 
 pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
@@ -36,9 +37,9 @@ pub fn draw_order_list(f: &mut Frame, area: Rect, app: &App) {
         };
 
         Row::new(vec![
-            Cell::from(order.timestamp.format("%H:%M:%S").to_string()).style(style),  // Added timestamp
+            Cell::from(order.timestamp.format("%H:%M:%S").to_string()).style(style),
             Cell::from(order.order_id.to_string()).style(style),
-            Cell::from(order.symbol.clone()).style(style),  // Added symbol
+            Cell::from(order.symbol.as_str()).style(style),
             Cell::from(format!("{:?}", order.side)).style(side_style),
             Cell::from(format_price(order.price)).style(style),
             Cell::from(order.quantity.to_string()).style(style),

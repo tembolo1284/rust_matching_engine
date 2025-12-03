@@ -28,7 +28,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Constraint::Min(10),     // Main content
             Constraint::Length(3),   // Status bar
         ])
-        .split(f.size());
+        .split(f.area());
 
     // Draw header
     draw_header(f, chunks[0], app);
@@ -41,7 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Draw help overlay if active
     if app.show_help {
-        draw_help(f, centered_rect(60, 60, f.size()));
+        draw_help(f, centered_rect(60, 60, f.area()));
     }
 }
 
@@ -58,14 +58,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     // Left: Symbol and connection status
     let connection_symbol = if app.connected { "✓" } else { "✗" };
     let connection_color = if app.connected { Color::Green } else { Color::Red };
-    
+
     let left_text = vec![
-        Span::styled(&app.current_symbol, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(app.current_symbol.as_str(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(" - "),
         Span::raw("Connected "),
         Span::styled(connection_symbol, Style::default().fg(connection_color)),
     ];
-    
+
     let left_paragraph = Paragraph::new(Line::from(left_text))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(left_paragraph, header_chunks[0]);

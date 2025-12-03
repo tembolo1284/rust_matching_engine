@@ -165,6 +165,9 @@ impl MatchingEngine {
         let symbol = msg.symbol;
         let key = (msg.user_id, msg.user_order_id);
 
+        // Generate timestamp FIRST (before borrowing order_books)
+        let timestamp = self.next_timestamp();
+
         // Get or create order book
         // Note: In strict Power of Ten mode, we'd reject unknown symbols.
         // Here we auto-create for flexibility.
@@ -172,9 +175,6 @@ impl MatchingEngine {
             .order_books
             .entry(symbol)
             .or_insert_with(|| OrderBook::with_capacity(symbol, self.config.levels_per_side));
-
-        // Generate timestamp
-        let timestamp = self.next_timestamp();
 
         // Process the order
         book.add_order(msg, timestamp, outputs);

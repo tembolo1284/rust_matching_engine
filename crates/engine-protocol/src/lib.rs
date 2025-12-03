@@ -6,12 +6,14 @@
 //! (`engine_core::InputMessage` / `OutputMessage`) into bytes and
 //! back again.
 //!
-//! - [`binary_codec`] : binary wire protocol (for multi-client TCP)
-//! - [`csv_codec`]    : CSV compatibility (for tools / replay)
+//! - `binary_codec` : binary wire protocol (for multi-client TCP)
+//! - `csv_codec`    : CSV compatibility (for tools / replay)
+//! - `fix_codec`    : FIX 4.2/4.4 protocol (for institutional connectivity)
 
 pub mod wire_types;
 pub mod binary_codec;
 pub mod csv_codec;
+pub mod fix_codec;
 
 pub use binary_codec::{
     ProtocolError,
@@ -19,5 +21,8 @@ pub use binary_codec::{
     encode_input,
     decode_output,
     encode_output,
+    BinaryEncoder,
+    BinaryDecoder,
 };
 
+pub use fix_codec::{FixEncoder, FixDecoder, FixVersion, FixError};

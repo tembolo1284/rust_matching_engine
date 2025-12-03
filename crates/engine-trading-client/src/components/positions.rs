@@ -32,7 +32,7 @@ pub fn draw_positions(f: &mut Frame, area: Rect, app: &App) {
         };
 
         Row::new(vec![
-            Cell::from(pos.symbol.clone()),
+            Cell::from(pos.symbol.as_str()),
             Cell::from(pos.quantity.to_string()).style(qty_style),
             Cell::from(format!("{:.2}", pos.avg_price)),
             Cell::from(format!("{:+.2}", pnl)).style(pnl_style),
@@ -46,7 +46,7 @@ pub fn draw_positions(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(10),
     ];
 
-    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
+    let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default()
             .title(" Positions ")

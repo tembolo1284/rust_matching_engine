@@ -1,5 +1,3 @@
-// crates/engine-protocol/src/csv_codec.rs
-
 //! CSV compatibility codec.
 //!
 //! This mirrors (and slightly extends) your original C++ CSV parser
@@ -38,7 +36,7 @@
 
 use std::num::ParseIntError;
 
-use engine_core::{Cancel, InputMessage, NewOrder, OutputMessage, Side, TopOfBookQuery};
+use engine_core::{Cancel, InputMessage, NewOrder, OutputMessage, Side, Symbol, TopOfBookQuery};
 
 /// Parse a single CSV line into an `InputMessage`.
 ///
@@ -78,7 +76,7 @@ fn parse_new_order(tokens: &[String]) -> Option<InputMessage> {
     }
 
     let user_id = parse_u32(&tokens[1]).ok()?;
-    let symbol = tokens[2].clone();
+    let symbol = Symbol::from_str(&tokens[2]);
     let price = parse_u32(&tokens[3]).ok()?;
     let quantity = parse_u32(&tokens[4]).ok()?;
 
@@ -95,14 +93,14 @@ fn parse_new_order(tokens: &[String]) -> Option<InputMessage> {
 
     let user_order_id = parse_u32(&tokens[6]).ok()?;
 
-    Some(InputMessage::NewOrder(NewOrder {
+    Some(InputMessage::NewOrder(NewOrder::new(
         user_id,
+        user_order_id,
         symbol,
         price,
         quantity,
         side,
-        user_order_id,
-    }))
+    )))
 }
 
 fn parse_cancel(tokens: &[String]) -> Option<InputMessage> {
@@ -114,10 +112,7 @@ fn parse_cancel(tokens: &[String]) -> Option<InputMessage> {
     let user_id = parse_u32(&tokens[1]).ok()?;
     let user_order_id = parse_u32(&tokens[2]).ok()?;
 
-    Some(InputMessage::Cancel(Cancel {
-        user_id,
-        user_order_id,
-    }))
+    Some(InputMessage::Cancel(Cancel::new(user_id, user_order_id)))
 }
 
 fn parse_query_tob(tokens: &[String]) -> Option<InputMessage> {
@@ -126,8 +121,8 @@ fn parse_query_tob(tokens: &[String]) -> Option<InputMessage> {
         return None;
     }
 
-    let symbol = tokens[1].clone();
-    Some(InputMessage::QueryTopOfBook(TopOfBookQuery { symbol }))
+    let symbol = Symbol::from_str(&tokens[1]);
+    Some(InputMessage::QueryTopOfBook(TopOfBookQuery::new(symbol)))
 }
 
 /// Format an `OutputMessage` as a CSV line (NEW, symbol-aware format).
@@ -152,7 +147,7 @@ pub fn format_output_csv(msg: &OutputMessage) -> String {
                 Side::Buy => 'B',
                 Side::Sell => 'S',
             };
-            if t.eliminated {
+            if t.is_eliminated() {
                 format!("B, {}, {}, -, -", t.symbol, side_char)
             } else {
                 format!(
@@ -190,7 +185,7 @@ pub fn format_output_legacy(msg: &OutputMessage) -> String {
                 Side::Buy => 'B',
                 Side::Sell => 'S',
             };
-            if t.eliminated {
+            if t.is_eliminated() {
                 format!("B, {}, -, -", side_char)
             } else {
                 format!("B, {}, {}, {}", side_char, t.price, t.total_quantity)
@@ -212,4 +207,3 @@ fn split_and_trim(s: &str, delimiter: char) -> Vec<String> {
 fn parse_u32(s: &str) -> Result<u32, ParseIntError> {
     s.parse::<u32>()
 }
-

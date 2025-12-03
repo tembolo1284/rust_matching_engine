@@ -51,6 +51,7 @@ pub struct NewOrder {
 }
 
 impl NewOrder {
+    /// Create a new order with the specified parameters.
     #[inline]
     pub fn new(
         user_id: u32,
@@ -88,11 +89,14 @@ impl NewOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Cancel {
+    /// The user/session ID that submitted the original order.
     pub user_id: u32,
+    /// The user-assigned order ID to cancel.
     pub user_order_id: u32,
 }
 
 impl Cancel {
+    /// Create a new cancel request.
     #[inline]
     pub fn new(user_id: u32, user_order_id: u32) -> Self {
         Cancel { user_id, user_order_id }
@@ -105,10 +109,12 @@ impl Cancel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct TopOfBookQuery {
+    /// The symbol to query.
     pub symbol: Symbol,
 }
 
 impl TopOfBookQuery {
+    /// Create a new top-of-book query for the given symbol.
     #[inline]
     pub fn new(symbol: Symbol) -> Self {
         TopOfBookQuery { symbol }
@@ -140,12 +146,16 @@ pub enum OutputMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Ack {
+    /// The user/session ID that submitted the order.
     pub user_id: u32,
+    /// The user-assigned order ID.
     pub user_order_id: u32,
+    /// The symbol for the acknowledged order.
     pub symbol: Symbol,
 }
 
 impl Ack {
+    /// Create a new order acknowledgement.
     #[inline]
     pub fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         Ack { user_id, user_order_id, symbol }
@@ -158,12 +168,16 @@ impl Ack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct CancelAck {
+    /// The user/session ID that submitted the cancel.
     pub user_id: u32,
+    /// The user-assigned order ID that was cancelled.
     pub user_order_id: u32,
+    /// The symbol for the cancelled order.
     pub symbol: Symbol,
 }
 
 impl CancelAck {
+    /// Create a new cancel acknowledgement.
     #[inline]
     pub fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         CancelAck { user_id, user_order_id, symbol }
@@ -193,6 +207,7 @@ pub struct Trade {
 }
 
 impl Trade {
+    /// Create a new trade execution report.
     #[inline]
     pub fn new(
         symbol: Symbol,
@@ -276,16 +291,19 @@ impl TopOfBook {
 // =============================================================================
 
 impl OutputMessage {
+    /// Create an order acknowledgement message.
     #[inline]
     pub fn ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         OutputMessage::Ack(Ack::new(user_id, user_order_id, symbol))
     }
 
+    /// Create a cancel acknowledgement message.
     #[inline]
     pub fn cancel_ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         OutputMessage::CancelAck(CancelAck::new(user_id, user_order_id, symbol))
     }
 
+    /// Create a trade execution message.
     #[inline]
     pub fn trade(
         symbol: Symbol,
@@ -307,11 +325,13 @@ impl OutputMessage {
         ))
     }
 
+    /// Create an active top-of-book update message.
     #[inline]
     pub fn top_of_book(symbol: Symbol, side: Side, price: u32, total_quantity: u32) -> Self {
         OutputMessage::TopOfBook(TopOfBook::active(symbol, side, price, total_quantity))
     }
 
+    /// Create an eliminated top-of-book update message.
     #[inline]
     pub fn top_of_book_eliminated(symbol: Symbol, side: Side) -> Self {
         OutputMessage::TopOfBook(TopOfBook::eliminated(symbol, side))
@@ -356,7 +376,7 @@ mod tests {
     #[test]
     fn test_output_message_symbol_extraction() {
         let sym = Symbol::from_str("AAPL");
-        
+
         let ack = OutputMessage::ack(1, 2, sym);
         assert_eq!(ack.symbol(), sym);
 

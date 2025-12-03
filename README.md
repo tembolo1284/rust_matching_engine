@@ -1,327 +1,127 @@
-# Rust Matching Engine  
-A multi-symbol, multi-client, TCP-based, high-performance trade matching engine inspired by your original C++ UDP/CSV order-book implementation — redesigned in Rust for scalability, safety, and extensibility.
+# Rust Matching Engine
 
-This engine supports:
+A high-performance, multi-protocol, multi-transport order matching engine built in Rust following NASA Power of Ten safety-critical coding rules and HFT low-latency principles.
 
-- **Binary protocol** for efficient wire communication  
-- **CSV protocol** (for compatibility & easy testing)  
-- **Multiple TCP clients connected simultaneously**  
-- **Real-time broadcasting** of Acks / Trades / Top-of-Book updates  
-- **Full order books per symbol**  
-- **Flush with CancelAck generation**  
-- **QueryTopOfBook event**  
-- **Beautiful startup and shutdown status banners**  
-- **Per-client outbound channels with backpressure-free fanout**  
+## Features
 
----
+- **Zero-allocation hot path** — Pre-allocated buffers, fixed-size types, no heap allocation during trading
+- **Cache-optimized** — 64-byte aligned orders, sequential memory access, L1/L2 cache friendly
+- **Multi-transport** — TCP, UDP, and Multicast support
+- **Multi-protocol** — CSV (human-readable), Binary (high-performance), FIX 4.2/4.4 (institutional)
+- **Bounded channels** — Backpressure handling prevents memory exhaustion
+- **Protocol auto-detection** — Automatically detects CSV/Binary/FIX from first bytes
+- **Smart message routing** — Acks to originator, trades to both parties, market data via multicast
 
-## Project Structure
-
-rust_matching_engine/
-
-├── Cargo.toml # Workspace manifest
-
-├── crates/
-
-│ ├── engine-core/ # Matching logic (order book, matching, TOB)
-
-│ ├── engine-protocol/ # Binary + CSV codecs
-
-│ ├── engine-server/ # TCP server, client registry, engine task
-
-│ └── engine-udp-adapter/ # Placeholder (future UDP support)
-
-└── tests/ # Integration tests
-
-## Architecture Overview
-
-### 1. engine-core — pure matching logic
-
-Contains all the real work:
-
-- OrderBook
-- Order structs
-- MatchingEngine
-- OutputMessage (Ack, CancelAck, Trade, TopOfBook)
-- NewOrder / Cancel / QueryTopOfBook
-- Flush (clears book + emits cancel acks)
-
-Completely synchronous and deterministic.
-
----
-
-### 2. engine-protocol — encoding/decoding
-
-Supports both:
-
-#### CSV protocol (easy for testing)
-
-N, 1, IBM, 10, 100, B, 1
-
-C, 1, 1
-
-Q, IBM
-
-F
-
-#### Binary protocol (length-prefixed)
-Used for efficient transmission over TCP.
-
----
-
-### 3. engine-server — async TCP server
-
-- Tokio-based async architecture  
-- Per-client tasks  
-- Central engine task  
-- Broadcast pub-sub fanout  
-- Graceful shutdown  
-- Statistics collection  
-- Auto-port fallback (9000 → 9001 → 9002)  
-
----
-
-## Build Instructions
-
-### Build whole workspace:
-
-cargo build --workspace
-
-### Release:
-
+## Quick Start
+```bash
+# Build
 cargo build --release
 
-## Running the Server
-
-### Default:
-
+# Run server with all transports enabled
 cargo run -p engine-server
 
-### Explicit bind address:
+# Test with netcat (CSV over TCP)
+echo "N, 1, IBM, 100, 50, B, 1" | nc localhost 9000
+```
 
-ENGINE_BIND_ADDR=127.0.0.1 ENGINE_PORT=9000 cargo run -p engine-server
+See [QUICK_START.md](docs/QUICK_START.md) for detailed examples of all transport/protocol combinations.
 
-### Auto-port fallback
+## Project Structure
+```
+rust_matching_engine/
+├── crates/
+│   ├── engine-core/          # Matching logic (zero-allocation)
+│   ├── engine-protocol/      # Binary, CSV, FIX codecs
+│   ├── engine-server/        # Multi-transport async server
+│   └── engine-trading-client/ # Terminal UI client
+├── docs/
+│   ├── ARCHITECTURE.md       # System design details
+│   ├── PROTOCOL.md           # Wire protocol specifications
+│   └── QUICK_START.md        # Launch examples
+└── tests/                    # Integration tests
+```
 
-If port 9000 is taken:
+## Transport & Protocol Matrix
 
-9000 -> 9001 -> 9002
+| Transport | CSV | Binary | FIX 4.2/4.4 | Use Case |
+|-----------|:---:|:------:|:-----------:|----------|
+| TCP | ✓ | ✓ | ✓ | General purpose, reliable delivery |
+| UDP | ✓ | ✓ | ✗ | Ultra-low latency |
+| Multicast | ✗ | ✓ | ✗ | Market data broadcast |
 
-## Startup Banner
+## Message Routing
 
-==============================================================
-Order Book - TCP Matching Engine
+| Message Type | Routing | Multicast |
+|--------------|---------|:---------:|
+| Ack | Originating client only | ✗ |
+| CancelAck | Originating client only | ✗ |
+| Trade | Buyer + Seller | ✓ |
+| TopOfBook | — | ✓ |
 
-Bind address: 0.0.0.0
+## Performance Characteristics
 
-TCP Port: 9001
+| Metric | Value |
+|--------|-------|
+| Order struct size | 64 bytes (cache-line aligned) |
+| Symbol size | 8 bytes (fixed, Copy) |
+| Message size | 16-40 bytes |
+| Hot path allocations | 0 |
+| Channel backpressure | Bounded (configurable) |
 
-Max clients: 1024
+## Configuration
 
-Note: bound after 2 attempts (port bumped due to AddrInUse).
-
-Queue Configuration:
-
-Engine request queue: Tokio mpsc::unbounded_channel()
-
-Client outbound queues: Tokio mpsc::unbounded_channel() per client
-
-Starting tasks...
-
-Engine task: started
-
-TCP listener: starting on 0.0.0.0:9001
-
-TCP listener ready on 0.0.0.0:9001 (press Ctrl+C to shutdown gracefully)
-
-## Running the Example TCP Client
-
-ENGINE_CLIENT_ADDR=127.0.0.1:9001 cargo run -p engine-server --example tcp_client
-
-N, 1, IBM, 10, 100, B, 1
-
-N, 2, IBM, 9, 50, S, 2
-
-Q, IBM
-
-F
-
-Output format:
-
-- `>>` sent to engine  
-
-- `<<` received from engine  
-
-Example session:
-
-N, 1, IBM, 10, 100, B, 1
-
-<< A, 1, 1, IBM
-
-<< B, IBM, B, 10, 100
-
-N, 2, IBM, 9, 50, 2
-
-<< A, 2, 2, IBM
-
-<< T, IBM, 1, 1, 2, 2, 10, 50
-
-<< B, IBM, B, 10, 50
-
-## Using netcat (CSV inpt file or single commands)
-
-### Send one order:
-
-echo "N, 1, IBM, 10, 100, B, 1" | nc 127.0.0.1 9001 &
-
-### Send an entire CSV file:
-
-nc 127.0.0.1 9001 < data/inputFile.csv
-
-Or:
-
-cat data/inputFile.csv | nc 127.0.0.1 9001 &
-
-## Running Tests
-
-### All tests:
-
-cargo test
-
-## Shutdown and Statistics
-
-Press **Ctrl+C** and you'll see:
-
-==============================================================
-
-Shutting down engine...
-
-Requests received: 42
-
-Outputs generated: 71
-
-Goodbye!
-
-
-## Trading Terminal Client
-
-A professional-grade terminal UI for interacting with the matching engine, providing real-time order book visualization, order management, and trade execution capabilities.
-
-### Features
-
-- **Real-time Order Book Display** - Live bid/ask depth visualization
-- **Order Management** - Place, track, and cancel orders
-- **Trade Blotter** - View recent executions with timestamps
-- **Position Tracking** - Monitor open positions and P&L
-- **Multi-Protocol Support** - Binary protocol for low latency, CSV for compatibility
-- **Keyboard-Driven Interface** - Fast hotkey trading for professionals
-
-### Installation & Launch
-
-#### Prerequisites
-- Rust toolchain (1.70+)
-- Running matching engine server
-
-#### Starting the Trading Terminal
-
-1. **Start the matching engine server** (in terminal 1):
+### Environment Variables
 ```bash
-cargo run -p engine-server
-# Server will start on port 9001 by default
+# TCP
+ENGINE_TCP_ADDR=0.0.0.0
+ENGINE_TCP_PORT=9000
+ENGINE_TCP_ENABLED=true
+
+# UDP  
+ENGINE_UDP_ADDR=0.0.0.0
+ENGINE_UDP_PORT=9001
+ENGINE_UDP_ENABLED=true
+
+# Multicast
+ENGINE_MCAST_GROUP=239.255.0.1
+ENGINE_MCAST_PORT=9002
+ENGINE_MCAST_ENABLED=true
+
+# Limits
+ENGINE_MAX_TCP_CLIENTS=1024
+ENGINE_CHANNEL_CAPACITY=100000
 ```
 
-2. **Launch the trading client** (in terminal 2):
+### Command Line
 ```bash
-# Basic launch with defaults
-cargo run -p engine-trading-client
-
-# With custom parameters
-cargo run -p engine-trading-client -- --server 127.0.0.1:9001 --user-id 1 --symbol AAPL
-
-# Enable debug logging
-cargo run -p engine-trading-client -- --debug
-
-# View help
-cargo run -p engine-trading-client -- --help
+cargo run -p engine-server -- --tcp-port 9000 --udp-port 9001 --no-mcast
+cargo run -p engine-server -- --help
 ```
 
-### Terminal UI Layout
-```
-┌──────────────────────────────────────────────────────────┐
-│ AAPL - Connected ✓    Trades: 5 | Volume: 1.2K | Msgs: 42│
-├─────────────────────┬──────────────┬────────────────────┤
-│    ORDER BOOK       │  MY ORDERS   │   RECENT TRADES    │
-│  BIDS      ASKS     │              │                    │
-│  100@105 | 50@106   │ #1234 B 100  │ 10:32:15 AAPL Buy  │
-│  200@104 | 100@107  │   @105 OPEN  │   100@105          │
-│                     │              │                    │
-│                     │              ├────────────────────┤
-│                     │              │    POSITIONS       │
-│                     │              │ AAPL +100 @105     │
-│                     │              │  P&L: +$50         │
-└─────────────────────┴──────────────┴────────────────────┘
-│ [B]uy [S]ell [C]ancel [X]Cancel All [Q]uit              │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Keyboard Shortcuts
-
-#### Trading Actions
-- `B` / `b` - Place Buy Order
-- `S` / `s` - Place Sell Order  
-- `M` / `m` - Toggle Market/Limit Order
-- `C` / `c` - Cancel Selected Order
-- `X` / `x` - Cancel All Orders
-
-#### Navigation
-- `Tab` - Next Panel
-- `Shift+Tab` - Previous Panel
-- `↑` / `k` - Move Selection Up
-- `↓` / `j` - Move Selection Down
-- `←` / `h` - Move Selection Left
-- `→` / `l` - Move Selection Right
-
-#### View Controls
-- `F1` - Toggle Help Menu
-- `F2` - Toggle Chart View (future)
-- `F3` - Toggle Market Depth
-- `/` - Search Symbol
-- `Q` / `q` - Quit
-
-### Order Entry Workflow
-
-1. Press `B` (buy) or `S` (sell) to start order entry
-2. Toggle between Market/Limit with `M`
-3. For Limit orders: Enter price
-4. Enter quantity
-5. Press `Enter` to submit order
-6. Press `Esc` to cancel entry
-
-### Testing the System
-
-You can test order matching by:
-
-1. **Using the UI**: Place buy and sell orders at the same price
-2. **Using netcat** (in another terminal):
+## Building
 ```bash
-# Send a buy order
-echo "N, 1, AAPL, 10000, 100, B, 1" | nc localhost 9001
+# Debug build
+cargo build --workspace
 
-# Send a matching sell order  
-echo "N, 2, AAPL, 10000, 100, S, 2" | nc localhost 9001
+# Release build (optimized)
+cargo build --release --workspace
+
+# Run tests
+cargo test --workspace
 ```
 
-### Configuration
+## Documentation
 
-Default settings can be modified via command-line arguments:
-- `--server` - Server address (default: 127.0.0.1:9001)
-- `--user-id` - Your trader ID (default: 1)
-- `--symbol` - Initial symbol to trade (default: AAPL)
-- `--debug` - Enable debug logging
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — System design, data structures, threading model
+- [PROTOCOL.md](docs/PROTOCOL.md) — Wire format specifications for all protocols
+- [QUICK_START.md](docs/QUICK_START.md) — Step-by-step examples for every transport/protocol
 
-### Troubleshooting
+## Trading Client
 
-- **Connection Failed**: Ensure the server is running before starting the client
-- **UI Rendering Issues**: Terminal should be at least 80x24 characters
-- **Orders Not Appearing**: Check server logs for processing errors
-- **Slow Response**: Binary protocol is faster than CSV for production use
+A professional terminal UI for live trading:
+```bash
+cargo run -p engine-trading-client -- --server 127.0.0.1:9000 --symbol IBM
+```
+
+See the [Trading Client section](docs/QUICK_START.md#trading-client) for details.
+

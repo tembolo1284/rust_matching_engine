@@ -13,20 +13,10 @@ categories = ["algorithms", "finance"]
 [dev-dependencies]
 criterion = "0.5"
 
-[[bench]]
-name = "matching"
-harness = false
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-
-[profile.bench]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+# Commented out until we create the benchmark file
+# [[bench]]
+# name = "matching"
+# harness = false
 
 [lints.rust]
 warnings = "deny"

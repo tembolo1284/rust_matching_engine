@@ -26,6 +26,9 @@ const MAX_ORDERS_PER_LEVEL: usize = 10_000;
 /// Maximum price levels per side.
 const MAX_PRICE_LEVELS: usize = 10_000;
 
+/// Default order capacity per price level.
+const DEFAULT_ORDERS_PER_LEVEL: usize = 64;
+
 /// A price level containing orders at a single price.
 #[derive(Debug, Clone)]
 struct PriceLevel {
@@ -34,17 +37,11 @@ struct PriceLevel {
 }
 
 impl PriceLevel {
+    /// Create a new price level with pre-allocated order capacity.
     fn new(price: u32) -> Self {
         PriceLevel {
             price,
-            orders: Vec::with_capacity(64), // Pre-allocate reasonable capacity
-        }
-    }
-
-    fn with_capacity(price: u32, capacity: usize) -> Self {
-        PriceLevel {
-            price,
-            orders: Vec::with_capacity(capacity),
+            orders: Vec::with_capacity(DEFAULT_ORDERS_PER_LEVEL),
         }
     }
 
@@ -272,7 +269,7 @@ impl OrderBook {
 
             // Match against orders at this level (FIFO)
             let level = &mut opposing_side[0];
-            
+
             let mut order_idx = 0;
             let mut inner_iterations = 0;
 
@@ -408,7 +405,7 @@ impl OrderBook {
     ) -> bool {
         for level_idx in 0..levels.len() {
             let level = &mut levels[level_idx];
-            
+
             // Find order in this level
             if let Some(order_idx) = level
                 .orders
@@ -416,12 +413,12 @@ impl OrderBook {
                 .position(|o| o.user_id == user_id && o.user_order_id == user_order_id)
             {
                 level.orders.remove(order_idx);
-                
+
                 // Remove empty level
                 if level.is_empty() {
                     levels.remove(level_idx);
                 }
-                
+
                 return true;
             }
         }
@@ -487,7 +484,7 @@ mod tests {
         assert_eq!(book.best_bid_price(), 1000);
         assert_eq!(book.best_bid_quantity(), 10);
         assert_eq!(book.best_ask_price(), 0);
-        
+
         // Should have: Ack + TOB update
         assert!(outputs.len() >= 2);
     }
@@ -576,7 +573,7 @@ mod tests {
         let found = book.cancel_order(1, 100, &mut outputs);
         assert!(found);
         assert_eq!(book.best_bid_price(), 0);
-        
+
         // Should have CancelAck
         assert!(outputs.iter().any(|m| matches!(m, OutputMessage::CancelAck(_))));
     }

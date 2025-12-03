@@ -80,8 +80,8 @@ use std::convert::TryFrom;
 use std::fmt;
 
 use engine_core::{
-    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, TopOfBook, TopOfBookQuery,
-    Trade,
+    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, TopOfBook,
+    TopOfBookQuery, Trade,
 };
 
 use crate::wire_types::{
@@ -188,22 +188,22 @@ fn decode_new_order(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[22..22 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
     if quantity == 0 {
         return Err(ProtocolError::InvalidField("quantity"));
     }
 
-    Ok(InputMessage::NewOrder(NewOrder {
+    Ok(InputMessage::NewOrder(NewOrder::new(
         user_id,
+        user_order_id,
         symbol,
         price,
         quantity,
         side,
-        user_order_id,
-    }))
+    )))
 }
 
 fn decode_cancel(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
@@ -214,10 +214,7 @@ fn decode_cancel(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
     let user_id = read_u32_be(&buf[4..8]);
     let user_order_id = read_u32_be(&buf[8..12]);
 
-    Ok(InputMessage::Cancel(Cancel {
-        user_id,
-        user_order_id,
-    }))
+    Ok(InputMessage::Cancel(Cancel::new(user_id, user_order_id)))
 }
 
 fn decode_query_tob(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
@@ -235,16 +232,16 @@ fn decode_query_tob(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[5..5 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
-    Ok(InputMessage::QueryTopOfBook(TopOfBookQuery { symbol }))
+    Ok(InputMessage::QueryTopOfBook(TopOfBookQuery::new(symbol)))
 }
 
 fn encode_input_new_order(n: &NewOrder, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = n.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = n.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -263,8 +260,8 @@ fn encode_input_new_order(n: &NewOrder, out: &mut Vec<u8>) -> Result<(), Protoco
     };
     out.push(side_byte);
 
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&n.symbol.as_bytes()[..symbol_len]);
 
     Ok(())
 }
@@ -288,8 +285,8 @@ fn encode_input_flush(out: &mut Vec<u8>) -> Result<(), ProtocolError> {
 }
 
 fn encode_input_query_tob(q: &TopOfBookQuery, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = q.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = q.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -297,8 +294,8 @@ fn encode_input_query_tob(q: &TopOfBookQuery, out: &mut Vec<u8>) -> Result<(), P
     out.push(PROTOCOL_VERSION);
     out.extend_from_slice(&[0, 0]);
 
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&q.symbol.as_bytes()[..symbol_len]);
 
     Ok(())
 }
@@ -346,8 +343,8 @@ pub fn decode_output(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
 }
 
 fn encode_ack(a: &Ack, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = a.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = a.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -358,15 +355,15 @@ fn encode_ack(a: &Ack, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
     out.extend_from_slice(&a.user_id.to_be_bytes());
     out.extend_from_slice(&a.user_order_id.to_be_bytes());
 
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&a.symbol.as_bytes()[..symbol_len]);
 
     Ok(())
 }
 
 fn encode_cancel_ack(c: &CancelAck, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = c.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = c.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -377,15 +374,15 @@ fn encode_cancel_ack(c: &CancelAck, out: &mut Vec<u8>) -> Result<(), ProtocolErr
     out.extend_from_slice(&c.user_id.to_be_bytes());
     out.extend_from_slice(&c.user_order_id.to_be_bytes());
 
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&c.symbol.as_bytes()[..symbol_len]);
 
     Ok(())
 }
 
 fn encode_trade(t: &Trade, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = t.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = t.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -394,8 +391,8 @@ fn encode_trade(t: &Trade, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
     out.extend_from_slice(&[0, 0]);
 
     // symbol
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&t.symbol.as_bytes()[..symbol_len]);
 
     // fields
     out.extend_from_slice(&t.user_id_buy.to_be_bytes());
@@ -409,8 +406,8 @@ fn encode_trade(t: &Trade, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
 }
 
 fn encode_top_of_book(t: &TopOfBook, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    let symbol_bytes = t.symbol.as_bytes();
-    if symbol_bytes.is_empty() || symbol_bytes.len() > MAX_SYMBOL_LEN {
+    let symbol_len = t.symbol.len();
+    if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
@@ -419,8 +416,8 @@ fn encode_top_of_book(t: &TopOfBook, out: &mut Vec<u8>) -> Result<(), ProtocolEr
     out.extend_from_slice(&[0, 0]);
 
     // symbol
-    out.push(u8::try_from(symbol_bytes.len()).unwrap());
-    out.extend_from_slice(symbol_bytes);
+    out.push(u8::try_from(symbol_len).unwrap());
+    out.extend_from_slice(&t.symbol.as_bytes()[..symbol_len]);
 
     // side
     let side_byte = match t.side {
@@ -430,7 +427,7 @@ fn encode_top_of_book(t: &TopOfBook, out: &mut Vec<u8>) -> Result<(), ProtocolEr
     out.push(side_byte);
 
     // eliminated
-    out.push(if t.eliminated { 1 } else { 0 });
+    out.push(if t.is_eliminated() { 1 } else { 0 });
 
     // price & qty (ignored by client if eliminated=1)
     out.extend_from_slice(&t.price.to_be_bytes());
@@ -453,15 +450,11 @@ fn decode_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[13..13 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
-    Ok(OutputMessage::Ack(Ack {
-        user_id,
-        user_order_id,
-        symbol,
-    }))
+    Ok(OutputMessage::Ack(Ack::new(user_id, user_order_id, symbol)))
 }
 
 fn decode_cancel_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
@@ -478,15 +471,11 @@ fn decode_cancel_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[13..13 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
-    Ok(OutputMessage::CancelAck(CancelAck {
-        user_id,
-        user_order_id,
-        symbol,
-    }))
+    Ok(OutputMessage::CancelAck(CancelAck::new(user_id, user_order_id, symbol)))
 }
 
 fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
@@ -504,9 +493,9 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[5..5 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
     let mut offset = 5 + symbol_len;
 
@@ -522,7 +511,7 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     offset += 4;
     let quantity = read_u32_be(&buf[offset..offset + 4]);
 
-    Ok(OutputMessage::Trade(Trade {
+    Ok(OutputMessage::Trade(Trade::new(
         symbol,
         user_id_buy,
         user_order_id_buy,
@@ -530,7 +519,7 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
         user_order_id_sell,
         price,
         quantity,
-    }))
+    )))
 }
 
 fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
@@ -548,9 +537,9 @@ fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     }
 
     let symbol_bytes = &buf[5..5 + symbol_len];
-    let symbol = std::str::from_utf8(symbol_bytes)
-        .map_err(|_| ProtocolError::InvalidSymbol)?
-        .to_string();
+    let symbol_str = std::str::from_utf8(symbol_bytes)
+        .map_err(|_| ProtocolError::InvalidSymbol)?;
+    let symbol = Symbol::from_str(symbol_str);
 
     let mut offset = 5 + symbol_len;
 
@@ -569,13 +558,114 @@ fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
     offset += 4;
     let total_quantity = read_u32_be(&buf[offset..offset + 4]);
 
-    Ok(OutputMessage::TopOfBook(TopOfBook {
-        symbol,
-        side,
-        price,
-        total_quantity,
-        eliminated,
-    }))
+    // Use the appropriate constructor based on eliminated flag
+    let tob = if eliminated {
+        TopOfBook::eliminated(symbol, side)
+    } else {
+        TopOfBook::active(symbol, side, price, total_quantity)
+    };
+
+    Ok(OutputMessage::TopOfBook(tob))
+}
+
+// =============================================================================
+// Encoder/Decoder wrapper types for stateful usage
+// =============================================================================
+
+/// Stateful binary encoder.
+///
+/// Wraps the encode functions with an internal buffer for convenience.
+#[derive(Debug, Default)]
+pub struct BinaryEncoder {
+    buf: Vec<u8>,
+}
+
+impl BinaryEncoder {
+    /// Create a new encoder with default buffer capacity.
+    pub fn new() -> Self {
+        BinaryEncoder {
+            buf: Vec::with_capacity(256),
+        }
+    }
+
+    /// Encode an input message, returning the bytes.
+    pub fn encode_input(&mut self, msg: &InputMessage) -> Result<&[u8], ProtocolError> {
+        self.buf.clear();
+        encode_input(msg, &mut self.buf)?;
+        Ok(&self.buf)
+    }
+
+    /// Encode an output message, returning the bytes.
+    pub fn encode_output(&mut self, msg: &OutputMessage) -> Result<&[u8], ProtocolError> {
+        self.buf.clear();
+        encode_output(msg, &mut self.buf)?;
+        Ok(&self.buf)
+    }
+
+    /// Get the internal buffer (for zero-copy access after encoding).
+    pub fn buffer(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// Clear the internal buffer.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+}
+
+/// Stateful binary decoder.
+#[derive(Debug, Default)]
+pub struct BinaryDecoder;
+
+impl BinaryDecoder {
+    /// Create a new decoder.
+    pub fn new() -> Self {
+        BinaryDecoder
+    }
+
+    /// Decode an input message from bytes.
+    pub fn decode_input(&self, data: &[u8]) -> Result<InputMessage, ProtocolError> {
+        decode_input(data)
+    }
+
+    /// Decode an output message from bytes.
+    pub fn decode_output(&self, data: &[u8]) -> Result<OutputMessage, ProtocolError> {
+        decode_output(data)
+    }
+
+    /// Peek at frame header to determine total frame size.
+    ///
+    /// For our protocol, the frame structure is:
+    /// - [0]: msg_type
+    /// - [1]: version
+    /// - [2..4]: reserved
+    /// - [4..]: body (variable length based on msg_type)
+    ///
+    /// This returns the minimum frame size needed for the given message type.
+    pub fn peek_frame_size(&self, header: &[u8]) -> Result<usize, ProtocolError> {
+        if header.len() < 4 {
+            return Err(ProtocolError::Truncated);
+        }
+
+        let msg_type = header[0];
+        let version = header[1];
+
+        if version != PROTOCOL_VERSION {
+            return Err(ProtocolError::VersionMismatch(version));
+        }
+
+        // Determine size based on message type
+        // These are minimum sizes; actual size depends on symbol length
+        let base_size = match msg_type {
+            0 => 22,  // NewOrder: header(4) + user_id(4) + user_order_id(4) + price(4) + qty(4) + side(1) + symbol_len(1) + symbol(1+)
+            1 => 12,  // Cancel: header(4) + user_id(4) + user_order_id(4)
+            2 => 4,   // Flush: header(4)
+            3 => 5,   // QueryTopOfBook: header(4) + symbol_len(1) + symbol(1+)
+            _ => return Err(ProtocolError::UnknownMessageType(msg_type)),
+        };
+
+        Ok(base_size)
+    }
 }
 
 // -----------------------------------------------------------------------------

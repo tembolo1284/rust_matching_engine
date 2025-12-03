@@ -17,7 +17,9 @@ pub enum EngineError {
 
     /// Order not found for cancel.
     OrderNotFound {
+        /// The user/session ID that submitted the order.
         user_id: u32,
+        /// The user-assigned order ID.
         user_order_id: u32,
     },
 

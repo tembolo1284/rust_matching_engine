@@ -17,8 +17,10 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum Side {
+    /// Buy side (bid).
     #[default]
     Buy = 0,
+    /// Sell side (ask/offer).
     Sell = 1,
 }
 

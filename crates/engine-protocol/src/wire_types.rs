@@ -13,6 +13,12 @@
 /// incompatible message variants.
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// Magic bytes for protocol detection.
+///
+/// Binary protocol frames start with these bytes to distinguish
+/// from CSV (which starts with printable ASCII like 'N', 'C', 'F').
+pub const MAGIC_BYTES: [u8; 2] = [0xBE, 0xEF];
+
 /// Input message types (client → server).
 ///
 /// These IDs are used in the first byte of each binary frame.
@@ -21,18 +27,16 @@ pub const PROTOCOL_VERSION: u8 = 1;
 pub enum WireInputType {
     /// New order (market or limit).
     NewOrder = 0,
-
     /// Cancel `(user_id, user_order_id)`.
     Cancel = 1,
-
     /// Flush all books.
     Flush = 2,
-
     /// Query current top-of-book for a symbol.
     QueryTopOfBook = 3,
 }
 
 impl WireInputType {
+    /// Parse from u8 wire format.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(WireInputType::NewOrder),
@@ -52,18 +56,16 @@ impl WireInputType {
 pub enum WireOutputType {
     /// Ack a new order.
     Ack = 10,
-
     /// Ack a cancel request.
     CancelAck = 11,
-
     /// Trade between buyer and seller.
     Trade = 12,
-
     /// Top-of-book event (snapshot or change).
     TopOfBook = 13,
 }
 
 impl WireOutputType {
+    /// Parse from u8 wire format.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             10 => Some(WireOutputType::Ack),
@@ -87,4 +89,3 @@ pub const MAX_SYMBOL_LEN: usize = 32;
 pub fn validate_symbol_len(len: usize) -> bool {
     len > 0 && len <= MAX_SYMBOL_LEN
 }
-

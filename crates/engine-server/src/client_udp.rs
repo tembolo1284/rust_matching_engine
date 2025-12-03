@@ -31,18 +31,14 @@ pub async fn run_udp_server(
     engine_tx: EngineTx,
     metrics: Arc<Metrics>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let socket = UdpSocket::bind(&config.udp_addr()).await?;
+    let socket = Arc::new(UdpSocket::bind(&config.udp_addr()).await?);
     eprintln!("UDP server listening on {}", config.udp_addr());
 
     // Track UDP "clients" by address
     let mut udp_clients: HashMap<SocketAddr, UdpClient> = HashMap::new();
-    
+
     // Pre-allocated buffers
     let mut recv_buf = vec![0u8; config.udp_buffer_size];
-    let mut send_buf = Vec::with_capacity(1024);
-    
-    // Encoder for responses
-    let mut encoder = binary_codec::BinaryEncoder::new();
 
     // Cleanup interval
     let cleanup_interval = Duration::from_secs(60);
@@ -81,13 +77,13 @@ pub async fn run_udp_server(
             };
 
             // Spawn task to handle outbound messages for this UDP client
-            let socket_clone = socket.clone();
+            let socket_clone = Arc::clone(&socket);
             let client_protocol = protocol;
             let metrics_clone = metrics.clone();
-            
+
             tokio::spawn(async move {
                 let mut encoder = binary_codec::BinaryEncoder::new();
-                
+
                 while let Some(msg) = out_rx.recv().await {
                     let send_result = match client_protocol {
                         Protocol::Csv => {
@@ -96,9 +92,9 @@ pub async fn run_udp_server(
                         }
                         Protocol::Binary => {
                             if let Ok(frame) = encoder.encode_output(&msg) {
-                                let len = (frame.len() as u32).to_be_bytes();
+                                let len_bytes = (frame.len() as u32).to_be_bytes();
                                 let mut buf = Vec::with_capacity(4 + frame.len());
-                                buf.extend_from_slice(&len);
+                                buf.extend_from_slice(&len_bytes);
                                 buf.extend_from_slice(frame);
                                 socket_clone.send_to(&buf, peer_addr).await
                             } else {
@@ -145,7 +141,7 @@ pub async fn run_udp_server(
                 } else {
                     data
                 };
-                
+
                 binary_codec::decode_input(payload).ok()
             }
             Protocol::Fix => None, // FIX not supported over UDP

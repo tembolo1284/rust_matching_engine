@@ -20,8 +20,10 @@
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum OrderType {
+    /// Market order: execute immediately at best available price.
     #[default]
     Market = 0,
+    /// Limit order: execute only at specified price or better.
     Limit = 1,
 }
 

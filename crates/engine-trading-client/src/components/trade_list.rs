@@ -22,7 +22,7 @@ pub fn draw_trade_list(f: &mut Frame, area: Rect, app: &App) {
 
         Row::new(vec![
             Cell::from(trade.timestamp.format("%H:%M:%S").to_string()),
-            Cell::from(trade.symbol.clone()),
+            Cell::from(trade.symbol.as_str()),
             Cell::from(format!("{:?}", trade.side)).style(side_style),
             Cell::from(format!("{:.2}", trade.price as f64 / 100.0)),
             Cell::from(trade.quantity.to_string()),
@@ -37,7 +37,7 @@ pub fn draw_trade_list(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(6),
     ];
 
-    let table = Table::new(rows, widths)  // Fixed: pass widths as second argument
+    let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default()
             .title(" Recent Trades ")

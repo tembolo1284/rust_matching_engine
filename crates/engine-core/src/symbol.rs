@@ -56,8 +56,7 @@ impl Symbol {
     #[inline]
     pub fn as_str(&self) -> &str {
         let len = self.len();
-        // Safety: We only store valid UTF-8 (ASCII symbols)
-        unsafe { std::str::from_utf8_unchecked(&self.0[..len]) }
+	std::str::from_utf8(&self.0[..len]).unwrap_or("")
     }
 
     /// Get the raw bytes (includes trailing nulls).
