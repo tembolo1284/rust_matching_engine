@@ -64,8 +64,7 @@
 use std::fmt;
 
 use engine_core::{
-    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, TopOfBook,
-    TopOfBookQuery, Trade,
+    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, TopOfBook, Trade,
 };
 
 use crate::wire_types::{MAGIC_BYTE, SYMBOL_SIZE, WireInputType, WireOutputType};
