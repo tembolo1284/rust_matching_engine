@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
 
-use engine_protocol::wire_types::MAGIC_BYTES;
+use engine_protocol::wire_types::MAGIC_BYTE;
 
 use crate::types::{Protocol, Transport};
 
@@ -131,22 +131,29 @@ fn detect_protocol_from_response(data: &[u8]) -> Protocol {
         return Protocol::Csv;
     }
 
-    // Check for binary magic bytes
-    if data.len() >= 4 && data[0..4] == MAGIC_BYTES {
-        return Protocol::Binary;
+    // Check for binary: magic byte 'M' followed by valid message type
+    if data.len() >= 2 && data[0] == MAGIC_BYTE {
+        let msg_type = data[1];
+        // Valid output types: 'A' (Ack), 'X' (CancelAck), 'T' (Trade), 'B' (TopOfBook)
+        if matches!(msg_type, b'A' | b'X' | b'T' | b'B') {
+            return Protocol::Binary;
+        }
     }
 
     // Check for FIX (starts with "8=FIX")
-    if data.len() >= 5 && &data[0..2] == b"8=" {
+    if data.len() >= 2 && &data[0..2] == b"8=" {
         return Protocol::Fix;
     }
 
-    // Check for length-prefixed binary (4-byte length then magic)
-    if data.len() >= 8 {
+    // Check for length-prefixed binary (4-byte length then magic byte)
+    if data.len() >= 6 {
         let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if len > 0 && len < 1000 && data.len() >= 4 + 4 {
-            if &data[4..8] == MAGIC_BYTES {
-                return Protocol::Binary;
+        if len > 0 && len < 1000 && data.len() >= 6 {
+            if data[4] == MAGIC_BYTE {
+                let msg_type = data[5];
+                if matches!(msg_type, b'A' | b'X' | b'T' | b'B') {
+                    return Protocol::Binary;
+                }
             }
         }
     }
