@@ -27,7 +27,7 @@ pub async fn handle_tcp_client(
     metrics: Arc<Metrics>,
 ) {
     let peer_addr = stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap());
-    
+
     Metrics::inc(&metrics.tcp_connections_total);
     Metrics::inc(&metrics.tcp_connections_active);
 
@@ -69,7 +69,7 @@ pub async fn handle_tcp_client(
     let writer_protocol = protocol;
     let writer_metrics = metrics.clone();
     let write_timeout = config.write_timeout;
-    
+
     let writer_handle = tokio::spawn(async move {
         let mut encoder = binary_codec::BinaryEncoder::new();
         let mut fix_encoder = fix_codec::FixEncoder::new(
@@ -138,7 +138,7 @@ pub async fn handle_tcp_client(
     // Cleanup
     clients.unregister(client_id).await;
     writer_handle.abort();
-    
+
     Metrics::dec(&metrics.tcp_connections_active);
     eprintln!("{}: disconnected", client_id);
 }
@@ -154,9 +154,9 @@ async fn read_csv_loop<R: AsyncBufReadExt + Unpin>(
 
     loop {
         line.clear();
-        
+
         let read_result = timeout(read_timeout, reader.read_line(&mut line)).await;
-        
+
         match read_result {
             Ok(Ok(0)) => return Ok(()), // EOF
             Ok(Ok(_)) => {
@@ -173,7 +173,7 @@ async fn read_csv_loop<R: AsyncBufReadExt + Unpin>(
                             user_id,
                             msg,
                         };
-                        
+
                         if engine_tx.send(request).await.is_err() {
                             return Err("engine channel closed".to_string());
                         }
@@ -198,55 +198,51 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
     read_timeout: Duration,
 ) -> Result<(), String> {
     let decoder = binary_codec::BinaryDecoder::new();
-    let mut header_buf = [0u8; 8]; // MENG + version + type + len
+    let mut len_buf = [0u8; 4];
     let mut payload_buf = vec![0u8; 256];
 
     loop {
-        // Read header with timeout
-        let header_result = timeout(read_timeout, reader.read_exact(&mut header_buf)).await;
-        
-        match header_result {
+        // Read 4-byte length prefix
+        let len_result = timeout(read_timeout, reader.read_exact(&mut len_buf)).await;
+
+        match len_result {
             Ok(Ok(_)) => {}
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
             Ok(Err(e)) => return Err(format!("read error: {}", e)),
             Err(_) => return Err("read timeout".to_string()),
         }
 
-        // Check frame size
-        let frame_size = match decoder.peek_frame_size(&header_buf) {
-            Ok(size) => size,
-            Err(e) => {
-                Metrics::inc(&metrics.decode_errors);
-                eprintln!("{}: invalid header: {:?}", client_id, e);
-                continue;
-            }
-        };
+        let frame_len = u32::from_be_bytes(len_buf) as usize;
 
-        // Resize buffer if needed
-        if payload_buf.len() < frame_size {
-            payload_buf.resize(frame_size, 0);
+        // Sanity check frame length
+        if frame_len == 0 {
+            eprintln!("{}: zero-length frame, skipping", client_id);
+            continue;
+        }
+        if frame_len > 65536 {
+            return Err(format!("frame too large: {} bytes", frame_len));
         }
 
-        // Copy header to buffer
-        payload_buf[..8].copy_from_slice(&header_buf);
+        // Resize buffer if needed
+        if payload_buf.len() < frame_len {
+            payload_buf.resize(frame_len, 0);
+        }
 
-        // Read remaining payload
-        if frame_size > 8 {
-            let payload_result = timeout(
-                read_timeout,
-                reader.read_exact(&mut payload_buf[8..frame_size]),
-            )
-            .await;
+        // Read frame payload
+        let payload_result = timeout(
+            read_timeout,
+            reader.read_exact(&mut payload_buf[..frame_len]),
+        )
+        .await;
 
-            match payload_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(format!("payload read error: {}", e)),
-                Err(_) => return Err("payload read timeout".to_string()),
-            }
+        match payload_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(format!("payload read error: {}", e)),
+            Err(_) => return Err("payload read timeout".to_string()),
         }
 
         // Decode message
-        match decoder.decode_input(&payload_buf[..frame_size]) {
+        match decoder.decode_input(&payload_buf[..frame_len]) {
             Ok(msg) => {
                 let user_id = extract_user_id(&msg);
                 let request = EngineRequest {
@@ -321,13 +317,13 @@ async fn read_fix_message<R: AsyncReadExt + Unpin>(
     // Read byte by byte looking for 10=XXX pattern followed by SOH
     let mut total = 0;
     let mut temp = [0u8; 1];
-    
+
     loop {
         let n = reader.read(&mut temp).await?;
         if n == 0 {
             return Ok(0); // EOF
         }
-        
+
         buf.push(temp[0]);
         total += 1;
 

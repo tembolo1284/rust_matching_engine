@@ -4,16 +4,18 @@
 //! - raw binary frames (`&[u8]`)
 //! - high-level `engine_core::InputMessage` / `OutputMessage`
 //!
-//! Framing model (single-message buffer):
+//! Frame format (single-message buffer):
 //!
 //! ```text
-//! Input (client → server)
-//! -----------------------
-//! [0]   : msg_type (WireInputType as u8)
-//! [1]   : version  (PROTOCOL_VERSION)
-//! [2..4]: reserved = 0
+//! All frames start with:
+//! [0]   : magic = 0x4D ('M')
+//! [1]   : msg_type
+//! [2]   : version (PROTOCOL_VERSION)
+//! [3]   : reserved = 0
 //! [4..] : body (depends on msg_type)
 //!
+//! Input (client → server)
+//! -----------------------
 //! NewOrder (type=0):
 //!   [4..8]   user_id (u32 BE)
 //!   [8..12]  user_order_id (u32 BE)
@@ -36,11 +38,6 @@
 //!
 //! Output (server → client)
 //! ------------------------
-//! [0]   : msg_type (WireOutputType as u8)
-//! [1]   : version
-//! [2..4]: reserved = 0
-//! [4..] : body
-//!
 //! Ack (type=10):
 //!   [4..8]   user_id (u32 BE)
 //!   [8..12]  user_order_id (u32 BE)
@@ -85,8 +82,11 @@ use engine_core::{
 };
 
 use crate::wire_types::{
-    validate_symbol_len, MAX_SYMBOL_LEN, PROTOCOL_VERSION, WireInputType, WireOutputType,
+    validate_symbol_len, MAX_SYMBOL_LEN, MAGIC_BYTE, PROTOCOL_VERSION, WireInputType, WireOutputType,
 };
+
+/// Header size: magic(1) + type(1) + version(1) + reserved(1) = 4 bytes
+pub const HEADER_SIZE: usize = 4;
 
 /// Errors that can arise when encoding/decoding a binary frame.
 #[derive(Debug)]
@@ -97,6 +97,8 @@ pub enum ProtocolError {
     UnknownMessageType(u8),
     /// Unsupported or mismatched protocol version.
     VersionMismatch(u8),
+    /// Invalid magic byte.
+    InvalidMagic(u8),
     /// Invalid symbol length or malformed UTF-8.
     InvalidSymbol,
     /// Invalid side or other semantic issue.
@@ -110,6 +112,9 @@ impl fmt::Display for ProtocolError {
             ProtocolError::UnknownMessageType(t) => write!(f, "Unknown message type: {}", t),
             ProtocolError::VersionMismatch(v) => {
                 write!(f, "Protocol version mismatch: got {}, expected {}", v, PROTOCOL_VERSION)
+            }
+            ProtocolError::InvalidMagic(m) => {
+                write!(f, "Invalid magic byte: got 0x{:02X}, expected 0x{:02X}", m, MAGIC_BYTE)
             }
             ProtocolError::InvalidSymbol => write!(f, "Invalid symbol"),
             ProtocolError::InvalidField(field) => write!(f, "Invalid field: {}", field),
@@ -127,12 +132,18 @@ impl std::error::Error for ProtocolError {}
 ///
 /// The buffer must contain exactly one full message as described above.
 pub fn decode_input(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
-    if buf.len() < 4 {
+    if buf.len() < HEADER_SIZE {
         return Err(ProtocolError::Truncated);
     }
 
-    let msg_type = buf[0];
-    let version = buf[1];
+    let magic = buf[0];
+    let msg_type = buf[1];
+    let version = buf[2];
+    // buf[3] is reserved
+
+    if magic != MAGIC_BYTE {
+        return Err(ProtocolError::InvalidMagic(magic));
+    }
 
     if version != PROTOCOL_VERSION {
         return Err(ProtocolError::VersionMismatch(version));
@@ -162,6 +173,7 @@ pub fn encode_input(msg: &InputMessage, out: &mut Vec<u8>) -> Result<(), Protoco
 }
 
 fn decode_new_order(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
+    // Header(4) + user_id(4) + order_id(4) + price(4) + qty(4) + side(1) + sym_len(1) = 22
     if buf.len() < 22 {
         return Err(ProtocolError::Truncated);
     }
@@ -207,6 +219,7 @@ fn decode_new_order(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
 }
 
 fn decode_cancel(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
+    // Header(4) + user_id(4) + order_id(4) = 12
     if buf.len() < 12 {
         return Err(ProtocolError::Truncated);
     }
@@ -218,6 +231,7 @@ fn decode_cancel(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
 }
 
 fn decode_query_tob(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
+    // Header(4) + sym_len(1) = 5
     if buf.len() < 5 {
         return Err(ProtocolError::Truncated);
     }
@@ -239,15 +253,21 @@ fn decode_query_tob(buf: &[u8]) -> Result<InputMessage, ProtocolError> {
     Ok(InputMessage::QueryTopOfBook(TopOfBookQuery::new(symbol)))
 }
 
+/// Write the standard header: magic, msg_type, version, reserved
+fn write_header(out: &mut Vec<u8>, msg_type: u8) {
+    out.push(MAGIC_BYTE);
+    out.push(msg_type);
+    out.push(PROTOCOL_VERSION);
+    out.push(0); // reserved
+}
+
 fn encode_input_new_order(n: &NewOrder, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
     let symbol_len = n.symbol.len();
     if symbol_len == 0 || symbol_len > MAX_SYMBOL_LEN {
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireInputType::NewOrder as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]); // reserved
+    write_header(out, WireInputType::NewOrder as u8);
 
     out.extend_from_slice(&n.user_id.to_be_bytes());
     out.extend_from_slice(&n.user_order_id.to_be_bytes());
@@ -267,9 +287,7 @@ fn encode_input_new_order(n: &NewOrder, out: &mut Vec<u8>) -> Result<(), Protoco
 }
 
 fn encode_input_cancel(c: &Cancel, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    out.push(WireInputType::Cancel as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireInputType::Cancel as u8);
 
     out.extend_from_slice(&c.user_id.to_be_bytes());
     out.extend_from_slice(&c.user_order_id.to_be_bytes());
@@ -278,9 +296,7 @@ fn encode_input_cancel(c: &Cancel, out: &mut Vec<u8>) -> Result<(), ProtocolErro
 }
 
 fn encode_input_flush(out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-    out.push(WireInputType::Flush as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireInputType::Flush as u8);
     Ok(())
 }
 
@@ -290,9 +306,7 @@ fn encode_input_query_tob(q: &TopOfBookQuery, out: &mut Vec<u8>) -> Result<(), P
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireInputType::QueryTopOfBook as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireInputType::QueryTopOfBook as u8);
 
     out.push(u8::try_from(symbol_len).unwrap());
     out.extend_from_slice(&q.symbol.as_bytes()[..symbol_len]);
@@ -320,12 +334,17 @@ pub fn encode_output(msg: &OutputMessage, out: &mut Vec<u8>) -> Result<(), Proto
 ///
 /// This is useful on the **client** side when reading from the server.
 pub fn decode_output(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
-    if buf.len() < 4 {
+    if buf.len() < HEADER_SIZE {
         return Err(ProtocolError::Truncated);
     }
 
-    let msg_type = buf[0];
-    let version = buf[1];
+    let magic = buf[0];
+    let msg_type = buf[1];
+    let version = buf[2];
+
+    if magic != MAGIC_BYTE {
+        return Err(ProtocolError::InvalidMagic(magic));
+    }
 
     if version != PROTOCOL_VERSION {
         return Err(ProtocolError::VersionMismatch(version));
@@ -348,9 +367,7 @@ fn encode_ack(a: &Ack, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireOutputType::Ack as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]); // reserved
+    write_header(out, WireOutputType::Ack as u8);
 
     out.extend_from_slice(&a.user_id.to_be_bytes());
     out.extend_from_slice(&a.user_order_id.to_be_bytes());
@@ -367,9 +384,7 @@ fn encode_cancel_ack(c: &CancelAck, out: &mut Vec<u8>) -> Result<(), ProtocolErr
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireOutputType::CancelAck as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireOutputType::CancelAck as u8);
 
     out.extend_from_slice(&c.user_id.to_be_bytes());
     out.extend_from_slice(&c.user_order_id.to_be_bytes());
@@ -386,9 +401,7 @@ fn encode_trade(t: &Trade, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireOutputType::Trade as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireOutputType::Trade as u8);
 
     // symbol
     out.push(u8::try_from(symbol_len).unwrap());
@@ -411,9 +424,7 @@ fn encode_top_of_book(t: &TopOfBook, out: &mut Vec<u8>) -> Result<(), ProtocolEr
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    out.push(WireOutputType::TopOfBook as u8);
-    out.push(PROTOCOL_VERSION);
-    out.extend_from_slice(&[0, 0]);
+    write_header(out, WireOutputType::TopOfBook as u8);
 
     // symbol
     out.push(u8::try_from(symbol_len).unwrap());
@@ -437,6 +448,7 @@ fn encode_top_of_book(t: &TopOfBook, out: &mut Vec<u8>) -> Result<(), ProtocolEr
 }
 
 fn decode_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
+    // Header(4) + user_id(4) + order_id(4) + sym_len(1) = 13
     if buf.len() < 13 {
         return Err(ProtocolError::Truncated);
     }
@@ -458,6 +470,7 @@ fn decode_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
 }
 
 fn decode_cancel_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
+    // Header(4) + user_id(4) + order_id(4) + sym_len(1) = 13
     if buf.len() < 13 {
         return Err(ProtocolError::Truncated);
     }
@@ -479,6 +492,7 @@ fn decode_cancel_ack(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
 }
 
 fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
+    // Header(4) + sym_len(1) = 5 minimum
     if buf.len() < 5 {
         return Err(ProtocolError::Truncated);
     }
@@ -488,7 +502,8 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    if buf.len() < 5 + symbol_len + 4 * 6 {
+    // Header(4) + sym_len(1) + symbol + 6*u32(24) = 5 + symbol_len + 24
+    if buf.len() < 5 + symbol_len + 24 {
         return Err(ProtocolError::Truncated);
     }
 
@@ -523,6 +538,7 @@ fn decode_trade(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
 }
 
 fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
+    // Header(4) + sym_len(1) = 5 minimum
     if buf.len() < 5 {
         return Err(ProtocolError::Truncated);
     }
@@ -532,7 +548,8 @@ fn decode_top_of_book(buf: &[u8]) -> Result<OutputMessage, ProtocolError> {
         return Err(ProtocolError::InvalidSymbol);
     }
 
-    if buf.len() < 5 + symbol_len + 1 + 1 + 4 + 4 {
+    // Header(4) + sym_len(1) + symbol + side(1) + elim(1) + price(4) + qty(4) = 5 + symbol_len + 10
+    if buf.len() < 5 + symbol_len + 10 {
         return Err(ProtocolError::Truncated);
     }
 
@@ -636,19 +653,25 @@ impl BinaryDecoder {
     /// Peek at frame header to determine total frame size.
     ///
     /// For our protocol, the frame structure is:
-    /// - [0]: msg_type
-    /// - [1]: version
-    /// - [2..4]: reserved
+    /// - [0]: magic ('M')
+    /// - [1]: msg_type
+    /// - [2]: version
+    /// - [3]: reserved
     /// - [4..]: body (variable length based on msg_type)
     ///
     /// This returns the minimum frame size needed for the given message type.
     pub fn peek_frame_size(&self, header: &[u8]) -> Result<usize, ProtocolError> {
-        if header.len() < 4 {
+        if header.len() < HEADER_SIZE {
             return Err(ProtocolError::Truncated);
         }
 
-        let msg_type = header[0];
-        let version = header[1];
+        let magic = header[0];
+        let msg_type = header[1];
+        let version = header[2];
+
+        if magic != MAGIC_BYTE {
+            return Err(ProtocolError::InvalidMagic(magic));
+        }
 
         if version != PROTOCOL_VERSION {
             return Err(ProtocolError::VersionMismatch(version));
@@ -675,4 +698,54 @@ impl BinaryDecoder {
 fn read_u32_be(bytes: &[u8]) -> u32 {
     let arr: [u8; 4] = bytes[0..4].try_into().expect("slice with incorrect length");
     u32::from_be_bytes(arr)
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_format() {
+        let mut buf = Vec::new();
+        write_header(&mut buf, 0);
+        assert_eq!(buf[0], MAGIC_BYTE);
+        assert_eq!(buf[1], 0); // msg_type
+        assert_eq!(buf[2], PROTOCOL_VERSION);
+        assert_eq!(buf[3], 0); // reserved
+    }
+
+    #[test]
+    fn test_roundtrip_new_order() {
+        let order = NewOrder::new(1, 100, Symbol::from_str("IBM"), 5000, 10, Side::Buy);
+        let msg = InputMessage::NewOrder(order);
+
+        let mut buf = Vec::new();
+        encode_input(&msg, &mut buf).unwrap();
+
+        // Verify magic byte
+        assert_eq!(buf[0], MAGIC_BYTE);
+
+        let decoded = decode_input(&buf).unwrap();
+        match decoded {
+            InputMessage::NewOrder(o) => {
+                assert_eq!(o.user_id, 1);
+                assert_eq!(o.user_order_id, 100);
+                assert_eq!(o.price, 5000);
+                assert_eq!(o.quantity, 10);
+                assert_eq!(o.side, Side::Buy);
+            }
+            _ => panic!("Expected NewOrder"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_magic() {
+        let buf = [0x00, 0x00, PROTOCOL_VERSION, 0x00]; // Wrong magic
+        let result = decode_input(&buf);
+        assert!(matches!(result, Err(ProtocolError::InvalidMagic(0x00))));
+    }
 }

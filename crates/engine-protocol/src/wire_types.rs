@@ -13,15 +13,16 @@
 /// incompatible message variants.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// Magic bytes for protocol detection.
+/// Magic byte for binary protocol detection.
 ///
-/// Binary protocol frames start with these bytes to distinguish
-/// from CSV (which starts with printable ASCII like 'N', 'C', 'F').
-pub const MAGIC_BYTES: [u8; 4] = *b"MENG";
+/// Binary protocol frames start with this byte to distinguish
+/// from CSV (which starts with printable ASCII like 'N', 'C', 'F')
+/// and FIX (which starts with '8=').
+pub const MAGIC_BYTE: u8 = 0x4D; // 'M'
 
 /// Input message types (client → server).
 ///
-/// These IDs are used in the first byte of each binary frame.
+/// These IDs are used in the second byte of each binary frame (after magic).
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WireInputType {
@@ -50,7 +51,7 @@ impl WireInputType {
 
 /// Output message types (server → client).
 ///
-/// These IDs are used in the first byte of each binary frame.
+/// These IDs are used in the second byte of each binary frame (after magic).
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WireOutputType {
