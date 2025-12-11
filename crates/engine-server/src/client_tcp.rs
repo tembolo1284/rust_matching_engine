@@ -44,6 +44,12 @@ pub async fn handle_tcp_client(
         Ok(buf) => {
             let len = buf.len().min(8);
             peek_buf[..len].copy_from_slice(&buf[..len]);
+            let hex: String = peek_buf[..len]
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("{}: peeked {} bytes: {}", client_id, len, hex);
             detect_protocol(&peek_buf[..len])
         }
         Err(_) => Protocol::Csv,
@@ -201,6 +207,8 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
     let mut len_buf = [0u8; 4];
     let mut payload_buf = vec![0u8; 256];
 
+    eprintln!("{}: entering binary read loop", client_id);
+
     loop {
         // Read 4-byte length prefix
         let len_result = timeout(read_timeout, reader.read_exact(&mut len_buf)).await;
@@ -213,6 +221,10 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
         }
 
         let frame_len = u32::from_be_bytes(len_buf) as usize;
+
+        // Debug: show length prefix
+        eprintln!("{}: len_prefix bytes: {:02X} {:02X} {:02X} {:02X} = {} bytes",
+            client_id, len_buf[0], len_buf[1], len_buf[2], len_buf[3], frame_len);
 
         // Sanity check frame length
         if frame_len == 0 {
@@ -257,7 +269,14 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
             }
             Err(e) => {
                 Metrics::inc(&metrics.decode_errors);
+                // Debug: show raw bytes for diagnosis
+                let hex: String = payload_buf[..frame_len.min(32)]
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 eprintln!("{}: decode error: {:?}", client_id, e);
+                eprintln!("{}: raw bytes (len={}): {}", client_id, frame_len, hex);
             }
         }
     }
