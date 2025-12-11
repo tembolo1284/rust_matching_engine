@@ -1,29 +1,28 @@
 # Quick Start Guide
 
-This guide shows how to run the matching engine server with different transport and protocol combinations.
+This guide shows how to run the matching engine server and test it with various clients.
 
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
 - [Building](#building)
 - [Server Startup](#server-startup)
-- [TCP with CSV](#tcp-with-csv)
-- [TCP with Binary](#tcp-with-binary)
-- [TCP with FIX](#tcp-with-fix)
-- [UDP with CSV](#udp-with-csv)
-- [UDP with Binary](#udp-with-binary)
+- [Testing with Scenarios](#testing-with-scenarios)
+- [Testing with CSV (netcat)](#testing-with-csv-netcat)
+- [Trading Client (TUI)](#trading-client-tui)
 - [Multicast Market Data](#multicast-market-data)
-- [Trading Client](#trading-client)
+- [Protocol Reference](#protocol-reference)
 
 ---
 
 ## Prerequisites
 
 - Rust 1.70+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- netcat (`nc`) for testing
-- Optional: `socat` for UDP testing
+- netcat (`nc`) for CSV testing
+- Optional: `socat` for multicast testing
 
 ## Building
+
 ```bash
 # Clone and build
 git clone <repo>
@@ -41,6 +40,7 @@ cargo build --release --workspace
 ## Server Startup
 
 ### Default (all transports enabled)
+
 ```bash
 cargo run --release -p engine-server
 ```
@@ -52,9 +52,9 @@ Output:
 ==============================================================
 
 Transports:
-  TCP:       0.0.0.0:9000 (CSV, Binary, FIX)
-  UDP:       0.0.0.0:9001 (CSV, Binary)
-  Multicast: 239.255.0.1:9002 (Binary)
+  TCP:       0.0.0.0:1234 (CSV, Binary, FIX)
+  UDP:       0.0.0.0:1235 (CSV, Binary)
+  Multicast: 239.255.0.1:1236 (Binary)
 
 Limits:
   Max TCP clients:    1024
@@ -67,11 +67,13 @@ Ready. Press Ctrl+C to shutdown.
 ```
 
 ### Custom ports
+
 ```bash
 cargo run -p engine-server -- --tcp-port 7000 --udp-port 7001
 ```
 
 ### Disable specific transports
+
 ```bash
 # TCP only
 cargo run -p engine-server -- --no-udp --no-mcast
@@ -81,6 +83,7 @@ cargo run -p engine-server -- --no-tcp --no-mcast
 ```
 
 ### Environment variables
+
 ```bash
 ENGINE_TCP_PORT=8000 \
 ENGINE_UDP_PORT=8001 \
@@ -90,21 +93,102 @@ cargo run -p engine-server
 
 ---
 
-## TCP with CSV
+## Testing with Scenarios
 
-The simplest way to interact with the engine. Great for testing with `netcat`.
+The scenarios runner is the recommended way to test the engine. It uses the **binary protocol** by default.
+
+### Start server (Terminal 1)
+
+```bash
+cargo run --release -p engine-server
+```
+
+### Run scenarios (Terminal 2)
+
+```bash
+# List available scenarios
+cargo run -p engine-server --example scenarios -- --help
+
+# Basic scenarios
+cargo run -p engine-server --example scenarios -- 1    # Simple orders
+cargo run -p engine-server --example scenarios -- 2    # Matching trade
+cargo run -p engine-server --example scenarios -- 3    # Cancel order
+
+# Use CSV protocol instead of binary
+cargo run -p engine-server --example scenarios -- --csv 1
+
+# Stress tests (unmatched orders)
+cargo run -p engine-server --example scenarios -- 10   # 1K orders
+cargo run -p engine-server --example scenarios -- 11   # 10K orders
+cargo run -p engine-server --example scenarios -- 12   # 100K orders
+
+# Matching stress tests (orders that trade)
+cargo run -p engine-server --example scenarios -- 20   # 1K trades
+cargo run -p engine-server --example scenarios -- 21   # 10K trades
+cargo run -p engine-server --example scenarios -- 22   # 100K trades
+cargo run -p engine-server --example scenarios -- 23   # 250K trades
+cargo run -p engine-server --example scenarios -- 24   # 500K trades
+
+# Dual-symbol stress (IBM + NVDA)
+cargo run -p engine-server --example scenarios -- 30   # 500K trades
+cargo run -p engine-server --example scenarios -- 31   # 1M trades
+```
+
+### Example output (Scenario 1)
+
+```
+Connecting to 127.0.0.1:1234...
+Connected (protocol: binary)
+=== Scenario 1: Simple Orders ===
+
+[RECV] A, IBM, 1, 1
+[RECV] B, IBM, B, 100, 50
+[RECV] A, IBM, 1, 2
+[RECV] B, IBM, S, 105, 50
+
+[Flush]
+[RECV] C, IBM, 1, 1
+[RECV] C, IBM, 1, 2
+[RECV] B, IBM, B, -, -
+[RECV] B, IBM, S, -, -
+```
+
+### Example output (Scenario 2 - Matching Trade)
+
+```
+Connecting to 127.0.0.1:1234...
+Connected (protocol: binary)
+=== Scenario 2: Matching Trade ===
+
+[RECV] A, IBM, 1, 1
+[RECV] B, IBM, B, 100, 50
+[RECV] A, IBM, 1, 2
+[RECV] T, IBM, 1, 1, 1, 2, 100, 50
+[RECV] B, IBM, B, -, -
+
+[Flush]
+```
+
+---
+
+## Testing with CSV (netcat)
+
+For quick manual testing, use netcat with the CSV protocol.
 
 ### Terminal 1: Start server
+
 ```bash
 cargo run --release -p engine-server
 ```
 
 ### Terminal 2: Connect with netcat
+
 ```bash
-nc localhost 9000
+nc localhost 1234
 ```
 
 ### Send orders interactively
+
 ```
 N, 1, IBM, 100, 50, B, 1
 A, 1, 1, IBM
@@ -116,171 +200,70 @@ T, IBM, 1, 1, 2, 1, 100, 50
 B, IBM, B, -, -
 ```
 
-### Send from file
-```bash
-# Create test file
-cat > orders.csv << 'EOF'
-N, 1, AAPL, 150, 100, B, 1
-N, 1, AAPL, 151, 50, B, 2
-N, 2, AAPL, 150, 75, S, 1
-F
-EOF
+### CSV Message Format
 
-# Send to server
-nc localhost 9000 < orders.csv
-```
+**Input (client → server):**
 
-### One-liner order
-```bash
-echo "N, 1, IBM, 100, 50, B, 1" | nc localhost 9000
-```
+| Type | Format | Example |
+|------|--------|---------|
+| New Order | `N, user_id, symbol, price, qty, side, order_id` | `N, 1, IBM, 100, 50, B, 1` |
+| Cancel | `C, user_id, order_id` | `C, 1, 1` |
+| Flush | `F` | `F` |
+| Query TOB | `Q, symbol` | `Q, IBM` |
+
+**Output (server → client):**
+
+| Type | Format | Example |
+|------|--------|---------|
+| Ack | `A, symbol, user_id, order_id` | `A, IBM, 1, 1` |
+| CancelAck | `C, symbol, user_id, order_id` | `C, IBM, 1, 1` |
+| Trade | `T, symbol, buy_user, buy_oid, sell_user, sell_oid, price, qty` | `T, IBM, 1, 1, 2, 1, 100, 50` |
+| TopOfBook | `B, symbol, side, price, qty` | `B, IBM, B, 100, 50` |
+| TOB Eliminated | `B, symbol, side, -, -` | `B, IBM, B, -, -` |
 
 ---
 
-## TCP with Binary
+## Trading Client (TUI)
 
-Higher performance than CSV. Protocol is auto-detected.
+Professional terminal UI for interactive trading.
 
-### Using the example client
+### Start the trading client
+
 ```bash
-# Terminal 1: Server
+# Terminal 1: Start server
 cargo run --release -p engine-server
 
-# Terminal 2: Binary client
-cargo run -p engine-server --example tcp_client -- --binary
+# Terminal 2: Start trading client
+cargo run --release -p engine-trading-client -- \
+    --server 127.0.0.1:1234 \
+    --user-id 1 \
+    --symbol IBM
 ```
 
-### Writing a custom client
-```rust
-use std::io::{Read, Write};
-use std::net::TcpStream;
+### Keyboard shortcuts
 
-fn main() {
-    let mut stream = TcpStream::connect("127.0.0.1:9000").unwrap();
-    
-    // Binary NewOrder frame
-    let frame: Vec<u8> = vec![
-        // Magic "MENG"
-        0x4D, 0x45, 0x4E, 0x47,
-        // Version 1, Type 0 (NewOrder), Length 25
-        0x01, 0x00, 0x00, 0x19,
-        // user_id = 1
-        0x00, 0x00, 0x00, 0x01,
-        // user_order_id = 1
-        0x00, 0x00, 0x00, 0x01,
-        // price = 10000
-        0x00, 0x00, 0x27, 0x10,
-        // quantity = 100
-        0x00, 0x00, 0x00, 0x64,
-        // side = Buy
-        0x00,
-        // symbol = "IBM"
-        0x49, 0x42, 0x4D, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    
-    // Length prefix + frame
-    let len = (frame.len() as u32).to_be_bytes();
-    stream.write_all(&len).unwrap();
-    stream.write_all(&frame).unwrap();
-    
-    // Read response
-    let mut response = vec![0u8; 1024];
-    let n = stream.read(&mut response).unwrap();
-    println!("Response: {:?}", &response[..n]);
-}
-```
+| Key | Action |
+|-----|--------|
+| B | Buy order |
+| S | Sell order |
+| C | Cancel selected |
+| X | Cancel all |
+| Tab | Next panel |
+| ↑/↓ | Navigate |
+| Q | Quit |
 
----
+### Command-line options
 
-## TCP with FIX
-
-FIX 4.2/4.4 for institutional connectivity. Protocol is auto-detected when message starts with `8=FIX`.
-
-### Enable FIX gateway
 ```bash
-cargo run -p engine-server -- --fix
-```
+cargo run -p engine-trading-client -- --help
 
-### Send FIX message
-```bash
-# NewOrderSingle (35=D)
-printf '8=FIX.4.4\x019=100\x0135=D\x0149=CLIENT\x0156=ENGINE\x0134=1\x0152=20240101-12:00:00.000\x0111=1\x0155=IBM\x0154=1\x0160=20240101-12:00:00.000\x0138=100\x0140=2\x0144=100.00\x0110=000\x01' | nc localhost 9000
-```
-
-### FIX message format
-```
-8=FIX.4.4|9=<len>|35=D|49=CLIENT|56=ENGINE|34=<seq>|52=<time>|
-11=<ClOrdID>|55=<Symbol>|54=<Side>|60=<TransactTime>|38=<Qty>|40=<OrdType>|44=<Price>|
-10=<checksum>|
-```
-
-Note: `|` represents SOH (0x01) delimiter.
-
----
-
-## UDP with CSV
-
-Low-latency with human-readable format.
-
-### Terminal 1: Start server
-```bash
-cargo run --release -p engine-server
-# UDP listening on port 9001
-```
-
-### Terminal 2: Send UDP messages
-```bash
-# Single order
-echo "N, 1, IBM, 100, 50, B, 1" | nc -u localhost 9001
-
-# Keep connection open for responses
-nc -u localhost 9001
-N, 1, IBM, 100, 50, B, 1
-```
-
-### Using socat for bidirectional UDP
-```bash
-socat - UDP:localhost:9001
-N, 1, IBM, 100, 50, B, 1
-```
-
----
-
-## UDP with Binary
-
-Lowest latency option.
-
-### Terminal 1: Start server
-```bash
-cargo run --release -p engine-server
-```
-
-### Terminal 2: Send binary UDP
-```bash
-# Using xxd to send raw bytes
-echo "4D454E470100001900000001000000010000271000000064004942 4D0000000000" | xxd -r -p | nc -u localhost 9001
-```
-
-### Python example
-```python
-import socket
-import struct
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-# Build NewOrder
-frame = b'MENG'  # Magic
-frame += struct.pack('>BBH', 1, 0, 25)  # version, type, len
-frame += struct.pack('>IIIIB', 1, 1, 10000, 100, 0)  # user, order, price, qty, side
-frame += b'IBM\x00\x00\x00\x00\x00'  # symbol
-
-# Length prefix + frame
-packet = struct.pack('>I', len(frame)) + frame
-sock.sendto(packet, ('127.0.0.1', 9001))
-
-# Receive response
-data, addr = sock.recvfrom(4096)
-print(f"Response: {data.hex()}")
+Options:
+  --server <HOST:PORT>   Server address (default: 127.0.0.1:1234)
+  --user-id <ID>         Your trader ID (default: 1)
+  --symbol <SYM>         Initial symbol (default: AAPL)
+  --binary               Use binary protocol (default)
+  --csv                  Use CSV protocol
+  --debug                Enable debug logging
 ```
 
 ---
@@ -289,40 +272,36 @@ print(f"Response: {data.hex()}")
 
 Receive trade and top-of-book updates via UDP multicast.
 
-### What is Multicast?
-
-Multicast sends data to multiple recipients simultaneously using a special IP address range (224.0.0.0 - 239.255.255.255). All subscribers to the multicast group receive the same data without the server sending individual copies.
-
-**Use case:** Market data distribution where many clients need the same information.
-
 ### Terminal 1: Start server with multicast
+
 ```bash
 cargo run --release -p engine-server
-# Multicast publishing on 239.255.0.1:9002
+# Multicast publishing on 239.255.0.1:1236
 ```
 
 ### Terminal 2: Subscribe to multicast
+
 ```bash
 # Using socat
-socat UDP4-RECVFROM:9002,ip-add-membership=239.255.0.1:0.0.0.0,fork -
+socat UDP4-RECVFROM:1236,ip-add-membership=239.255.0.1:0.0.0.0,fork -
 ```
 
-### Terminal 3: Generate trades (which get multicast)
+### Terminal 3: Generate trades
+
 ```bash
-nc localhost 9000
-N, 1, IBM, 100, 50, B, 1
-N, 2, IBM, 100, 50, S, 1
+cargo run -p engine-server --example scenarios -- 2
 ```
 
 You should see the trade appear in Terminal 2.
 
 ### Python multicast subscriber
+
 ```python
 import socket
 import struct
 
 MCAST_GROUP = '239.255.0.1'
-MCAST_PORT = 9002
+MCAST_PORT = 1236
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -342,88 +321,80 @@ while True:
     print(f"Seq={seq_num} Len={frame_len} Frame={frame.hex()}")
 ```
 
-### Multicast packet format
-```
-[0-7]   Sequence number (u64 BE) - for gap detection
-[8-11]  Frame length (u32 BE)
-[12-N]  Binary frame (standard format)
-```
-
 ---
 
-## Trading Client
+## Protocol Reference
 
-Professional terminal UI for interactive trading.
+### Binary Protocol
 
-### Start the trading client
-```bash
-# Terminal 1: Start server
-cargo run --release -p engine-server
+The binary protocol uses a simple frame format with length prefix for TCP:
 
-# Terminal 2: Start trading client
-cargo run --release -p engine-trading-client -- \
-    --server 127.0.0.1:9000 \
-    --user-id 1 \
-    --symbol IBM
+**TCP Framing:** `[4-byte length BE][frame]`
+
+**Frame Format:**
+```
+[0]   : magic = 0x4D ('M')
+[1]   : msg_type
+[2]   : version (1)
+[3]   : reserved (0)
+[4..] : body (varies by message type)
 ```
 
-### Keyboard shortcuts
+**Message Types:**
 
-| Key | Action |
-|-----|--------|
-| B | Buy order |
-| S | Sell order |
-| C | Cancel selected |
-| X | Cancel all |
-| Tab | Next panel |
-| ↑/↓ | Navigate |
-| Q | Quit |
+| Type | ID | Direction |
+|------|----|-----------|
+| NewOrder | 0 | Input |
+| Cancel | 1 | Input |
+| Flush | 2 | Input |
+| QueryTOB | 3 | Input |
+| Ack | 10 | Output |
+| CancelAck | 11 | Output |
+| Trade | 12 | Output |
+| TopOfBook | 13 | Output |
 
-### Command-line options
-```bash
-cargo run -p engine-trading-client -- --help
+### Protocol Auto-Detection
 
-Options:
-  --server <HOST:PORT>   Server address (default: 127.0.0.1:9000)
-  --user-id <ID>         Your trader ID (default: 1)
-  --symbol <SYM>         Initial symbol (default: AAPL)
-  --binary               Use binary protocol (default: CSV)
-  --debug                Enable debug logging
-```
+The server auto-detects the protocol from the first bytes:
+- Starts with `M` + valid msg_type → Binary
+- Starts with `8=FIX` → FIX  
+- Starts with `N`, `C`, `F`, `Q` → CSV
 
 ---
 
 ## Summary Table
 
-| Transport | Protocol | Port | Command |
-|-----------|----------|------|---------|
-| TCP | CSV | 9000 | `nc localhost 9000` |
-| TCP | Binary | 9000 | Custom client |
-| TCP | FIX | 9000 | FIX client |
-| UDP | CSV | 9001 | `nc -u localhost 9001` |
-| UDP | Binary | 9001 | Custom client |
-| Multicast | Binary | 9002 | `socat` subscriber |
+| Transport | Protocol | Port | Test Command |
+|-----------|----------|------|--------------|
+| TCP | Binary | 1234 | `cargo run -p engine-server --example scenarios -- 1` |
+| TCP | CSV | 1234 | `nc localhost 1234` |
+| TCP | FIX | 1234 | FIX client |
+| UDP | CSV | 1235 | `nc -u localhost 1235` |
+| UDP | Binary | 1235 | Custom client |
+| Multicast | Binary | 1236 | `socat` subscriber |
 
 ---
 
 ## Troubleshooting
 
 ### Connection refused
+
 ```bash
 # Check if server is running
 ps aux | grep engine-server
 
 # Check if port is in use
-lsof -i :9000
+lsof -i :1234
 ```
 
 ### No multicast data
+
 ```bash
 # Check if multicast is enabled
-cargo run -p engine-server  # Look for "Multicast: 239.255.0.1:9002"
+cargo run -p engine-server  # Look for "Multicast: 239.255.0.1:1236"
 
 # Check firewall
-sudo ufw allow 9002/udp
+sudo ufw allow 1236/udp
 
 # Check multicast routing
 ip maddr show
@@ -432,8 +403,8 @@ ip maddr show
 ### Protocol not detected correctly
 
 The server auto-detects protocol from the first bytes:
-- Starts with `MENG` → Binary
-- Starts with `8=FIX` → FIX  
-- Starts with `N`, `C`, `F`, `Q` → CSV
+- Binary: First byte is `M` (0x4D) followed by valid msg_type (0-3)
+- FIX: Starts with `8=`
+- CSV: Starts with `N`, `C`, `F`, `Q`, or other printable ASCII
 
 If having issues, ensure your first message clearly indicates the protocol.

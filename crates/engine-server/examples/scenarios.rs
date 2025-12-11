@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use engine_core::OutputMessage;
 use engine_protocol::{
     binary_codec::{BinaryDecoder, BinaryEncoder},
-    csv_codec::{format_output_csv, parse_input_line},
+    csv_codec::parse_input_line,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -40,7 +40,7 @@ impl Default for Config {
         Config {
             server_addr: env::var("ENGINE_SERVER_ADDR")
                 .unwrap_or_else(|_| "127.0.0.1:1234".to_string()),
-            use_binary: false,
+            use_binary: true,  // Default to binary protocol
             quiet: false,
         }
     }
@@ -463,6 +463,12 @@ async fn run_scenario_1(client: &mut Client) -> Result<(), Box<dyn Error>> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     recv_and_print(client).await;
 
+    // Flush to clean out the book
+    eprintln!("\n[Flush]");
+    client.send_flush().await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    recv_and_print(client).await;
+
     Ok(())
 }
 
@@ -474,6 +480,12 @@ async fn run_scenario_2(client: &mut Client) -> Result<(), Box<dyn Error>> {
     recv_and_print(client).await;
 
     client.send_new_order(1, "IBM", 100, 50, 'S', 2).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    recv_and_print(client).await;
+
+    // Flush to clean out the book
+    eprintln!("\n[Flush]");
+    client.send_flush().await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     recv_and_print(client).await;
 
@@ -491,16 +503,68 @@ async fn run_scenario_3(client: &mut Client) -> Result<(), Box<dyn Error>> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     recv_and_print(client).await;
 
+    // Flush to clean out the book
+    eprintln!("\n[Flush]");
+    client.send_flush().await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    recv_and_print(client).await;
+
     Ok(())
 }
 
 async fn recv_and_print(client: &mut Client) {
-    for _ in 0..20 {
+    // Give server time to process and respond
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    
+    for _ in 0..50 {
         if let Some(msg) = client.try_recv().await {
-            let csv = format_output_csv(&msg);
-            eprintln!("[RECV] {}", csv);
+            print_message(&msg);
         } else {
-            break;
+            // Small sleep between attempts to allow more data to arrive
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Try one more time
+            if let Some(msg) = client.try_recv().await {
+                print_message(&msg);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn print_message(msg: &OutputMessage) {
+    match msg {
+        OutputMessage::Ack(a) => {
+            eprintln!("[RECV] A, {}, {}, {}", a.symbol, a.user_id, a.user_order_id);
+        }
+        OutputMessage::CancelAck(c) => {
+            eprintln!("[RECV] C, {}, {}, {}", c.symbol, c.user_id, c.user_order_id);
+        }
+        OutputMessage::Trade(t) => {
+            eprintln!(
+                "[RECV] T, {}, {}, {}, {}, {}, {}, {}",
+                t.symbol,
+                t.user_id_buy,
+                t.user_order_id_buy,
+                t.user_id_sell,
+                t.user_order_id_sell,
+                t.price,
+                t.quantity
+            );
+        }
+        OutputMessage::TopOfBook(tob) => {
+            let side_char = match tob.side {
+                engine_core::Side::Buy => 'B',
+                engine_core::Side::Sell => 'S',
+            };
+            if tob.is_eliminated() {
+                eprintln!("[RECV] B, {}, {}, -, -", tob.symbol, side_char);
+            } else {
+                eprintln!(
+                    "[RECV] B, {}, {}, {}, {}",
+                    tob.symbol, side_char, tob.price, tob.total_quantity
+                );
+            }
         }
     }
 }
@@ -845,6 +909,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     while i < args.len() {
         match args[i].as_str() {
             "--binary" | "-b" => config.use_binary = true,
+            "--csv" | "-c" => config.use_binary = false,
             "--quiet" | "-q" => config.quiet = true,
             "--server" | "-s" => {
                 i += 1;
@@ -856,7 +921,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Usage: scenarios [OPTIONS] <SCENARIO_NUMBER>");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  -b, --binary        Use binary protocol (default: CSV)");
+                eprintln!("  -b, --binary        Use binary protocol (default)");
+                eprintln!("  -c, --csv           Use CSV protocol");
                 eprintln!("  -q, --quiet         Reduce output verbosity");
                 eprintln!("  -s, --server ADDR   Server address (default: 127.0.0.1:1234)");
                 eprintln!("  -h, --help          Show this help");
@@ -887,3 +953,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut client = Client::connect(&config).await?;
     run_scenario(&mut client, scenario, config.quiet).await
 }
+
