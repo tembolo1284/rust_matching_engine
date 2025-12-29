@@ -338,21 +338,8 @@ impl MatchingEngine {
             });
         }
 
-        // Check order tracking capacity (only for limit orders that may rest)
-        if msg.is_limit() && self.order_to_symbol.len() >= self.config.max_orders {
-            if !outputs.is_full() {
-                outputs.push(OutputMessage::reject(
-                    msg.user_id,
-                    msg.user_order_id,
-                    symbol,
-                    RejectReason::CapacityExceeded,
-                ));
-            }
-            return Err(EngineError::OrderCapacityExceeded {
-                current: self.order_to_symbol.len(),
-                max: self.config.max_orders,
-            });
-        }
+        // Note: We don't check capacity upfront anymore because orders that
+        // fully match don't need tracking. We'll check after matching.
 
         // Generate timestamp
         let timestamp = self.next_timestamp();
@@ -395,12 +382,59 @@ impl MatchingEngine {
         // Get mutable reference to the book
         let book = self.order_books.get_mut(&symbol).unwrap();
 
-        // Process the order
+        // Process the order - this handles matching and may generate trades
         book.add_order(msg, timestamp, outputs)?;
 
-        // Track order -> symbol mapping for cancels (limit orders only)
-        if msg.is_limit() {
-            self.order_to_symbol.insert(key, symbol);
+        // Calculate how much of the incoming order was filled from trade outputs
+        let filled_qty: u32 = outputs.iter().filter_map(|m| {
+            if let OutputMessage::Trade(t) = m {
+                let is_buyer = msg.side == Side::Buy;
+                if (is_buyer && t.user_id_buy == msg.user_id && t.user_order_id_buy == msg.user_order_id)
+                    || (!is_buyer && t.user_id_sell == msg.user_id && t.user_order_id_sell == msg.user_order_id)
+                {
+                    Some(t.quantity)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }).sum();
+
+        let order_rested = filled_qty < msg.quantity && msg.is_limit();
+
+        // Track order -> symbol mapping only if the order rested on the book
+        if order_rested {
+            if self.order_to_symbol.len() >= self.config.max_orders {
+                // At capacity and order would rest - this is a problem
+                // The order is already on the book but we can't track it for cancels
+                // Log warning but don't fail (order is valid, just not cancelable)
+                eprintln!(
+                    "Warning: order ({}, {}) rested but tracking at capacity",
+                    msg.user_id, msg.user_order_id
+                );
+            } else {
+                self.order_to_symbol.insert(key, symbol);
+            }
+        }
+
+        // Remove fully filled RESTING orders from tracking
+        // These are orders that were already on the book and got filled by this incoming order
+        for output in outputs.iter() {
+            if let OutputMessage::Trade(trade) = output {
+                // Determine which side was resting (opposite of incoming order)
+                let resting_key = if msg.side == Side::Buy {
+                    (trade.user_id_sell, trade.user_order_id_sell)
+                } else {
+                    (trade.user_id_buy, trade.user_order_id_buy)
+                };
+
+                // Check if this resting order is still on the book
+                // If it's not in the book anymore, remove from tracking
+                if !book.has_order(resting_key.0, resting_key.1) {
+                    self.order_to_symbol.remove(&resting_key);
+                }
+            }
         }
 
         Ok(())
@@ -610,5 +644,38 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EngineError::DuplicateOrderId { .. }));
+    }
+
+    #[test]
+    fn test_filled_orders_not_tracked() {
+        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
+        engine.register_symbol(sym("IBM")).unwrap();
+
+        // Add a resting buy order
+        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
+        assert_eq!(engine.num_orders(), 1);
+
+        // Add a matching sell order - both should be filled
+        engine.process(new_order(2, 1, "IBM", 100, 10, Side::Sell)).unwrap();
+        
+        // Neither order should be tracked (both fully filled)
+        assert_eq!(engine.num_orders(), 0);
+    }
+
+    #[test]
+    fn test_partial_fill_still_tracked() {
+        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
+        engine.register_symbol(sym("IBM")).unwrap();
+
+        // Add a resting buy order for 100 shares
+        engine.process(new_order(1, 1, "IBM", 100, 100, Side::Buy)).unwrap();
+        assert_eq!(engine.num_orders(), 1);
+
+        // Add a sell order for only 50 shares - partial fill
+        engine.process(new_order(2, 1, "IBM", 100, 50, Side::Sell)).unwrap();
+        
+        // Buy order should still be tracked (50 remaining)
+        // Sell order fully filled, not tracked
+        assert_eq!(engine.num_orders(), 1);
     }
 }

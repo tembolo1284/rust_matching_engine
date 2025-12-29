@@ -209,6 +209,21 @@ impl OrderBook {
         self.asks.len()
     }
 
+    /// Check if an order exists in the book.
+    pub fn has_order(&self, user_id: u32, user_order_id: u32) -> bool {
+        for level in &self.bids {
+            if level.orders.iter().any(|o| o.user_id == user_id && o.user_order_id == user_order_id) {
+                return true;
+            }
+        }
+        for level in &self.asks {
+            if level.orders.iter().any(|o| o.user_id == user_id && o.user_order_id == user_order_id) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Add an order to the book, performing matching.
     pub fn add_order(
         &mut self,
