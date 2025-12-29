@@ -138,9 +138,13 @@ pub async fn handle_tcp_client(
     };
 
     if let Err(e) = read_result {
-        eprintln!("{}: read error: {}", client_id, e);
+        // Don't log "connection reset" as an error - it's normal client disconnect
+        if e.contains("Connection reset") || e.contains("eof") {
+            eprintln!("{}: client disconnected", client_id);
+        } else {
+            eprintln!("{}: read error: {}", client_id, e);
+        }
     }
-
     // Cleanup
     clients.unregister(client_id).await;
     writer_handle.abort();
