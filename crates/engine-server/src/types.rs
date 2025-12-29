@@ -160,7 +160,7 @@ impl ClientRegistry {
 
     /// Register a new client.
     pub async fn register(&self, info: ClientInfo, tx: OutboundTx) {
-        debug_assert!(!info.id.0 == 0, "invalid client ID");
+        debug_assert!(info.id.0 != 0, "invalid client ID");
 
         let client_id = info.id;
         let entry = ClientEntry { info, tx };
