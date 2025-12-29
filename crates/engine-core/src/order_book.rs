@@ -1,515 +1,498 @@
-//! Multi-symbol matching engine with strict Power of Ten compliance.
+//! Order book implementation with Power of Ten compliance.
 //!
 //! # Architecture
-//! - Pre-registered symbols with pre-created order books.
-//! - Fixed-capacity order tracking (no allocation after init).
-//! - Unknown symbols are rejected (strict mode).
-//! - All operations return `Result` for explicit error handling.
+//! - Price levels stored in sorted ArrayVec (bids descending, asks ascending).
+//! - Orders within a level maintain FIFO order.
+//! - All operations bounded by compile-time constants.
 //!
 //! # Power of Ten Compliance
-//! - Rule 2: All loops bounded.
-//! - Rule 3: No dynamic allocation after initialization.
-//! - Rule 5: Minimum 2 assertions per function.
-//! - Rule 7: All return values checked.
-use rustc_hash::FxHashMap;
+//! - Rule 2: All loops bounded by MAX_* constants.
+//! - Rule 3: No dynamic allocation (ArrayVec with fixed capacity).
+//! - Rule 5: Assertions on all operations.
+
+use arrayvec::ArrayVec;
+
 use crate::error::{EngineError, EngineResult};
-use crate::messages::{Cancel, InputMessage, NewOrder, OutputMessage, RejectReason, TopOfBookQuery};
-use crate::order_book::{OrderBook, MAX_OUTPUTS_PER_ORDER};
+use crate::messages::{NewOrder, OutputMessage};
+use crate::order::Order;
 use crate::side::Side;
 use crate::symbol::Symbol;
 use crate::top_of_book::TopOfBookSnapshot;
-use arrayvec::ArrayVec;
 
 // =============================================================================
-// Configuration
+// Constants (Power of Ten Rule 2: bounded loops)
 // =============================================================================
 
-/// Configuration for engine initialization.
-#[derive(Debug, Clone)]
-pub struct EngineConfig {
-    /// Maximum number of symbols.
-    pub max_symbols: usize,
-    /// Maximum tracked orders (for order-to-symbol map).
-    pub max_orders: usize,
-    /// Price levels per side per book.
-    pub levels_per_side: usize,
-    /// Enable strict mode (reject unknown symbols).
-    pub strict_mode: bool,
-}
+/// Maximum outputs per order (ack + trades + TOB updates).
+pub const MAX_OUTPUTS_PER_ORDER: usize = 64;
 
-impl Default for EngineConfig {
-    fn default() -> Self {
-        EngineConfig {
-            max_symbols: 1024,
-            max_orders: 1_000_000,
-            levels_per_side: 256,
-            strict_mode: true, // Power of Ten compliant by default
-        }
-    }
-}
+/// Maximum price levels per side.
+pub const MAX_PRICE_LEVELS: usize = 256;
 
-impl EngineConfig {
-    /// Create a config for testing (smaller capacities).
-    pub fn for_testing() -> Self {
-        EngineConfig {
-            max_symbols: 64,
-            max_orders: 10_000,
-            levels_per_side: 64,
-            strict_mode: true,
-        }
-    }
+/// Maximum orders per price level.
+pub const MAX_ORDERS_PER_LEVEL: usize = 1024;
 
-    /// Create a lenient config (auto-creates symbols).
-    pub fn lenient() -> Self {
-        EngineConfig {
-            strict_mode: false,
-            ..Default::default()
-        }
-    }
-}
-
-// =============================================================================
-// Symbol Constants
-// =============================================================================
-
-/// Symbol used when cancel target is unknown.
-pub const UNKNOWN_SYMBOL: Symbol = Symbol([b'<', b'U', b'N', b'K', b'>', 0, 0, 0]);
-
-// =============================================================================
-// Matching Engine
-// =============================================================================
-
-/// Multi-symbol matching engine.
-///
-/// # Memory Model
-/// All memory is pre-allocated at construction:
-/// - Order books: `FxHashMap<Symbol, OrderBook>` with reserved capacity.
-/// - Order tracking: `FxHashMap<(u32, u32), Symbol>` with reserved capacity.
-///
-/// After `new()` or `with_config()`, no further heap allocation occurs
-/// during normal operation (assuming capacities are not exceeded).
-#[derive(Debug)]
-pub struct MatchingEngine {
-    /// Symbol -> OrderBook.
-    /// Using FxHashMap for faster hashing (non-cryptographic).
-    order_books: FxHashMap<Symbol, OrderBook>,
-    /// (user_id, user_order_id) -> Symbol for cancel routing.
-    order_to_symbol: FxHashMap<(u32, u32), Symbol>,
-    /// Configuration.
-    config: EngineConfig,
-    /// Timestamp counter for ordering (can be replaced with external clock).
-    timestamp_counter: u64,
-}
+/// Maximum match iterations to prevent runaway loops.
+pub const MAX_MATCH_ITERATIONS: usize = 10_000;
 
 // Compile-time verification
-const _: () = assert!(
-    std::mem::size_of::<MatchingEngine>() <= 256,
-    "MatchingEngine should be reasonably sized"
-);
+const _: () = assert!(MAX_OUTPUTS_PER_ORDER >= 4, "need space for ack + trade + 2 TOB");
+const _: () = assert!(MAX_PRICE_LEVELS >= 1, "need at least one price level");
+const _: () = assert!(MAX_ORDERS_PER_LEVEL >= 1, "need at least one order per level");
 
-impl MatchingEngine {
-    /// Create a new engine with default configuration.
-    pub fn new() -> Self {
-        Self::with_config(EngineConfig::default())
-    }
+// =============================================================================
+// Price Level
+// =============================================================================
 
-    /// Create a new engine with custom configuration.
-    ///
-    /// All memory is pre-allocated based on config values.
-    pub fn with_config(config: EngineConfig) -> Self {
-        debug_assert!(config.max_symbols > 0, "max_symbols must be > 0");
-        debug_assert!(config.max_orders > 0, "max_orders must be > 0");
-        debug_assert!(config.levels_per_side > 0, "levels_per_side must be > 0");
+/// A single price level containing orders at the same price.
+#[derive(Debug, Clone)]
+pub struct PriceLevel {
+    /// Price for this level.
+    pub price: u32,
+    /// Orders at this price (FIFO order).
+    pub orders: ArrayVec<Order, MAX_ORDERS_PER_LEVEL>,
+}
 
-        let mut order_books = FxHashMap::default();
-        order_books.reserve(config.max_symbols);
-
-        let mut order_to_symbol = FxHashMap::default();
-        order_to_symbol.reserve(config.max_orders);
-
-        let engine = MatchingEngine {
-            order_books,
-            order_to_symbol,
-            config,
-            timestamp_counter: 0,
-        };
-
-        debug_assert!(engine.order_books.capacity() >= engine.config.max_symbols);
-        debug_assert!(engine.order_to_symbol.capacity() >= engine.config.max_orders);
-
-        engine
-    }
-
-    /// Get the configuration.
+impl PriceLevel {
+    /// Create a new price level.
     #[inline]
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
+    pub fn new(price: u32) -> Self {
+        debug_assert!(price > 0, "price level with zero price");
+        PriceLevel {
+            price,
+            orders: ArrayVec::new(),
+        }
     }
 
-    // =========================================================================
-    // Symbol Registration
-    // =========================================================================
+    /// Total quantity at this level.
+    #[inline]
+    pub fn total_quantity(&self) -> u32 {
+        self.orders.iter().map(|o| o.remaining_quantity()).sum()
+    }
 
-    /// Pre-register a symbol (creates order book upfront).
-    ///
-    /// Call this at startup for all known symbols to avoid allocation
-    /// during trading.
-    ///
-    /// # Returns
-    /// - `Ok(true)` if symbol was newly registered.
-    /// - `Ok(false)` if symbol was already registered.
-    /// - `Err` if max symbols exceeded.
-    pub fn register_symbol(&mut self, symbol: Symbol) -> EngineResult<bool> {
-        debug_assert!(!symbol.is_empty(), "cannot register empty symbol");
+    /// Check if level is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
 
-        if self.order_books.contains_key(&symbol) {
-            debug_assert!(self.order_books.len() <= self.config.max_symbols);
-            return Ok(false);
-        }
+    /// Number of orders at this level.
+    #[inline]
+    pub fn order_count(&self) -> usize {
+        self.orders.len()
+    }
 
-        if self.order_books.len() >= self.config.max_symbols {
-            return Err(EngineError::MaxSymbolsExceeded {
-                current: self.order_books.len(),
-                max: self.config.max_symbols,
+    /// Add an order to this level.
+    #[inline]
+    pub fn add_order(&mut self, order: Order) -> EngineResult<()> {
+        debug_assert_eq!(order.price, self.price, "order price must match level");
+        
+        if self.orders.is_full() {
+            return Err(EngineError::LevelCapacityExceeded {
+                price: self.price,
+                current: self.orders.len(),
+                max: MAX_ORDERS_PER_LEVEL,
             });
         }
-
-        let book = OrderBook::with_capacity(symbol, self.config.levels_per_side);
-        self.order_books.insert(symbol, book);
-
-        debug_assert!(self.order_books.contains_key(&symbol));
-        Ok(true)
+        
+        self.orders.push(order);
+        debug_assert!(!self.orders.is_empty());
+        Ok(())
     }
 
-    /// Pre-register multiple symbols.
-    ///
-    /// # Returns
-    /// Number of newly registered symbols.
-    pub fn register_symbols(&mut self, symbols: impl IntoIterator<Item = Symbol>) -> EngineResult<usize> {
-        let mut count = 0;
-        for sym in symbols {
-            if self.register_symbol(sym)? {
-                count += 1;
-            }
+    /// Remove filled orders from the front.
+    pub fn remove_filled(&mut self) {
+        while !self.orders.is_empty() && self.orders[0].is_filled() {
+            self.orders.remove(0);
         }
-        debug_assert!(count <= self.config.max_symbols);
-        Ok(count)
     }
+}
 
-    /// Check if a symbol is registered.
-    #[inline]
-    pub fn is_registered(&self, symbol: Symbol) -> bool {
-        self.order_books.contains_key(&symbol)
-    }
+// =============================================================================
+// Order Book
+// =============================================================================
 
-    // =========================================================================
-    // Message Processing
-    // =========================================================================
+/// Order book for a single symbol.
+///
+/// Maintains buy and sell sides with price-time priority.
+#[derive(Debug)]
+pub struct OrderBook {
+    /// Symbol for this book.
+    symbol: Symbol,
+    /// Bid levels (sorted descending by price - best bid first).
+    bids: ArrayVec<PriceLevel, MAX_PRICE_LEVELS>,
+    /// Ask levels (sorted ascending by price - best ask first).
+    asks: ArrayVec<PriceLevel, MAX_PRICE_LEVELS>,
+}
 
-    /// Process a single input message, writing outputs to the provided buffer.
-    ///
-    /// # Performance
-    /// Uses fixed-size `ArrayVec` for zero-allocation output handling.
-    ///
-    /// # Returns
-    /// - `Ok(())` on success.
-    /// - `Err(EngineError)` on capacity exceeded or invalid input.
-    pub fn process_message(
-        &mut self,
-        msg: InputMessage,
-        outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
-    ) -> EngineResult<()> {
-        debug_assert!(
-            outputs.remaining_capacity() > 0,
-            "output buffer must have space"
-        );
-
-        match msg {
-            InputMessage::NewOrder(new_order) => {
-                self.process_new_order(&new_order, outputs)
-            }
-            InputMessage::Cancel(cancel) => {
-                self.process_cancel(cancel, outputs);
-                Ok(())
-            }
-            InputMessage::Flush => {
-                self.process_flush(outputs);
-                Ok(())
-            }
-            InputMessage::QueryTopOfBook(query) => {
-                self.process_query_top_of_book(query, outputs);
-                Ok(())
-            }
+impl OrderBook {
+    /// Create a new order book for a symbol.
+    pub fn new(symbol: Symbol) -> Self {
+        debug_assert!(!symbol.is_empty(), "order book with empty symbol");
+        
+        OrderBook {
+            symbol,
+            bids: ArrayVec::new(),
+            asks: ArrayVec::new(),
         }
     }
 
-    /// Convenience: process message and return new ArrayVec.
-    ///
-    /// Prefer `process_message` with reusable buffer for hot path.
-    pub fn process(&mut self, msg: InputMessage) -> EngineResult<ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>> {
-        let mut outputs = ArrayVec::new();
-        self.process_message(msg, &mut outputs)?;
-        Ok(outputs)
+    /// Create with specific capacity hint (for pre-allocation).
+    pub fn with_capacity(symbol: Symbol, _levels_per_side: usize) -> Self {
+        // ArrayVec has fixed capacity, so we ignore the hint
+        // but keep the API for compatibility
+        Self::new(symbol)
     }
 
-    // =========================================================================
-    // Query Methods
-    // =========================================================================
-
-    /// Get a reference to an order book by symbol.
+    /// Get the symbol.
     #[inline]
-    pub fn get_book(&self, symbol: Symbol) -> Option<&OrderBook> {
-        self.order_books.get(&symbol)
+    pub fn symbol(&self) -> Symbol {
+        self.symbol
     }
 
-    /// Get mutable reference to an order book.
+    /// Get top-of-book snapshot.
+    pub fn top_of_book(&self) -> TopOfBookSnapshot {
+        let (bid_price, bid_qty) = self.bids.first()
+            .map(|l| (l.price, l.total_quantity()))
+            .unwrap_or((0, 0));
+        
+        let (ask_price, ask_qty) = self.asks.first()
+            .map(|l| (l.price, l.total_quantity()))
+            .unwrap_or((0, 0));
+        
+        TopOfBookSnapshot {
+            bid_price,
+            bid_quantity: bid_qty,
+            ask_price,
+            ask_quantity: ask_qty,
+        }
+    }
+
+    /// Best bid price (0 if no bids).
     #[inline]
-    pub fn get_book_mut(&mut self, symbol: Symbol) -> Option<&mut OrderBook> {
-        self.order_books.get_mut(&symbol)
+    pub fn best_bid_price(&self) -> u32 {
+        self.bids.first().map(|l| l.price).unwrap_or(0)
     }
 
-    /// Get top-of-book snapshot for a symbol.
+    /// Best bid quantity (0 if no bids).
     #[inline]
-    pub fn top_of_book(&self, symbol: Symbol) -> TopOfBookSnapshot {
-        self.order_books
-            .get(&symbol)
-            .map(|b| b.top_of_book())
-            .unwrap_or(TopOfBookSnapshot::EMPTY)
+    pub fn best_bid_quantity(&self) -> u32 {
+        self.bids.first().map(|l| l.total_quantity()).unwrap_or(0)
     }
 
-    /// Number of registered symbols.
+    /// Best ask price (0 if no asks).
     #[inline]
-    pub fn num_symbols(&self) -> usize {
-        self.order_books.len()
+    pub fn best_ask_price(&self) -> u32 {
+        self.asks.first().map(|l| l.price).unwrap_or(0)
     }
 
-    /// Number of tracked orders.
+    /// Best ask quantity (0 if no asks).
     #[inline]
-    pub fn num_orders(&self) -> usize {
-        self.order_to_symbol.len()
+    pub fn best_ask_quantity(&self) -> u32 {
+        self.asks.first().map(|l| l.total_quantity()).unwrap_or(0)
     }
 
-    /// Remaining order capacity.
+    /// Number of bid levels.
     #[inline]
-    pub fn remaining_order_capacity(&self) -> usize {
-        self.config.max_orders.saturating_sub(self.order_to_symbol.len())
+    pub fn bid_level_count(&self) -> usize {
+        self.bids.len()
     }
 
-    /// Set the timestamp counter (for deterministic testing).
+    /// Number of ask levels.
     #[inline]
-    pub fn set_timestamp(&mut self, ts: u64) {
-        self.timestamp_counter = ts;
+    pub fn ask_level_count(&self) -> usize {
+        self.asks.len()
     }
 
-    /// Get current timestamp.
-    #[inline]
-    pub fn current_timestamp(&self) -> u64 {
-        self.timestamp_counter
-    }
-
-    // =========================================================================
-    // Internal Handlers
-    // =========================================================================
-
-    fn process_new_order(
+    /// Add an order to the book, performing matching.
+    pub fn add_order(
         &mut self,
         msg: &NewOrder,
+        timestamp: u64,
         outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
     ) -> EngineResult<()> {
-        debug_assert!(msg.quantity > 0, "new order with zero quantity");
-        debug_assert!(!msg.symbol.is_empty(), "new order with empty symbol");
+        debug_assert_eq!(msg.symbol, self.symbol, "order symbol must match book");
+        debug_assert!(msg.quantity > 0, "order with zero quantity");
 
-        let symbol = msg.symbol;
-        let key = msg.key();
+        // Create order
+        let mut order = Order::from_new_order(msg, timestamp);
 
-        // Check for duplicate order ID
-        if self.order_to_symbol.contains_key(&key) {
-            if !outputs.is_full() {
-                outputs.push(OutputMessage::reject(
-                    msg.user_id,
-                    msg.user_order_id,
-                    symbol,
-                    RejectReason::DuplicateOrderId,
-                ));
-            }
-            return Err(EngineError::DuplicateOrderId {
-                user_id: msg.user_id,
-                user_order_id: msg.user_order_id,
-            });
+        // Emit Ack first
+        if !outputs.is_full() {
+            outputs.push(OutputMessage::ack(
+                msg.user_id,
+                msg.user_order_id,
+                self.symbol,
+            ));
         }
 
-        // Check order tracking capacity (only for limit orders that may rest)
-        if msg.is_limit() && self.order_to_symbol.len() >= self.config.max_orders {
-            if !outputs.is_full() {
-                outputs.push(OutputMessage::reject(
-                    msg.user_id,
-                    msg.user_order_id,
-                    symbol,
-                    RejectReason::CapacityExceeded,
-                ));
-            }
-            return Err(EngineError::OrderCapacityExceeded {
-                current: self.order_to_symbol.len(),
-                max: self.config.max_orders,
-            });
+        let old_bid = self.best_bid_price();
+        let old_ask = self.best_ask_price();
+
+        // Match against opposite side
+        self.match_order(&mut order, outputs)?;
+
+        // If order has remaining quantity and is a limit order, add to book
+        if !order.is_filled() && order.is_limit() {
+            self.insert_order(order)?;
         }
 
-        // Generate timestamp BEFORE borrowing the book to avoid borrow conflict
-        let timestamp = self.next_timestamp();
+        // Emit TOB updates if changed
+        self.emit_tob_updates(old_bid, old_ask, outputs);
 
-        // Get order book (strict mode: reject unknown symbols)
-        if self.config.strict_mode {
-            if !self.order_books.contains_key(&symbol) {
+        Ok(())
+    }
+
+    /// Cancel an order.
+    pub fn cancel_order(
+        &mut self,
+        user_id: u32,
+        user_order_id: u32,
+        outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
+    ) {
+        let old_bid = self.best_bid_price();
+        let old_ask = self.best_ask_price();
+
+        // Search bids
+        let mut found = false;
+        for level in &mut self.bids {
+            if let Some(pos) = level.orders.iter().position(|o| {
+                o.user_id == user_id && o.user_order_id == user_order_id
+            }) {
+                level.orders.remove(pos);
+                found = true;
+                break;
+            }
+        }
+
+        // Search asks if not found in bids
+        if !found {
+            for level in &mut self.asks {
+                if let Some(pos) = level.orders.iter().position(|o| {
+                    o.user_id == user_id && o.user_order_id == user_order_id
+                }) {
+                    level.orders.remove(pos);
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Clean up empty levels
+        self.bids.retain(|l| !l.is_empty());
+        self.asks.retain(|l| !l.is_empty());
+
+        // Emit CancelAck
+        if !outputs.is_full() {
+            outputs.push(OutputMessage::cancel_ack(
+                user_id,
+                user_order_id,
+                self.symbol,
+            ));
+        }
+
+        // Emit TOB updates if changed
+        self.emit_tob_updates(old_bid, old_ask, outputs);
+    }
+
+    /// Flush (cancel all orders).
+    pub fn flush(&mut self, outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>) {
+        // Emit CancelAck for each order
+        for level in &self.bids {
+            for order in &level.orders {
                 if !outputs.is_full() {
-                    outputs.push(OutputMessage::reject(
-                        msg.user_id,
-                        msg.user_order_id,
-                        symbol,
-                        RejectReason::UnknownSymbol,
+                    outputs.push(OutputMessage::cancel_ack(
+                        order.user_id,
+                        order.user_order_id,
+                        self.symbol,
                     ));
                 }
-                return Err(EngineError::UnknownSymbol(symbol));
             }
-        } else {
-            // Lenient mode: auto-create book
-            if !self.order_books.contains_key(&symbol) {
-                if self.order_books.len() >= self.config.max_symbols {
-                    if !outputs.is_full() {
-                        outputs.push(OutputMessage::reject(
-                            msg.user_id,
-                            msg.user_order_id,
-                            symbol,
-                            RejectReason::CapacityExceeded,
-                        ));
-                    }
-                    return Err(EngineError::MaxSymbolsExceeded {
-                        current: self.order_books.len(),
-                        max: self.config.max_symbols,
-                    });
+        }
+        for level in &self.asks {
+            for order in &level.orders {
+                if !outputs.is_full() {
+                    outputs.push(OutputMessage::cancel_ack(
+                        order.user_id,
+                        order.user_order_id,
+                        self.symbol,
+                    ));
                 }
-                let new_book = OrderBook::with_capacity(symbol, self.config.levels_per_side);
-                self.order_books.insert(symbol, new_book);
             }
         }
 
-        // Now get mutable reference to the book
-        let book = self.order_books.get_mut(&symbol).unwrap();
+        // Clear all levels
+        self.bids.clear();
+        self.asks.clear();
 
-        // Process the order
-        book.add_order(msg, timestamp, outputs)?;
+        // Emit TOB eliminated
+        if !outputs.is_full() {
+            outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Buy));
+        }
+        if !outputs.is_full() {
+            outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Sell));
+        }
+    }
 
-        // Track order -> symbol mapping for cancels (limit orders only)
-        if msg.is_limit() {
-            self.order_to_symbol.insert(key, symbol);
+    // =========================================================================
+    // Internal Methods
+    // =========================================================================
+
+    fn match_order(
+        &mut self,
+        order: &mut Order,
+        outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
+    ) -> EngineResult<()> {
+        let opposite_side = match order.side {
+            Side::Buy => &mut self.asks,
+            Side::Sell => &mut self.bids,
+        };
+
+        let mut iterations = 0;
+
+        while !order.is_filled() && !opposite_side.is_empty() && iterations < MAX_MATCH_ITERATIONS {
+            iterations += 1;
+
+            let best_level = &mut opposite_side[0];
+
+            // Check price compatibility
+            let prices_cross = match order.side {
+                Side::Buy => order.price == 0 || order.price >= best_level.price,
+                Side::Sell => order.price == 0 || order.price <= best_level.price,
+            };
+
+            if !prices_cross {
+                break;
+            }
+
+            // Match against orders at this level
+            while !order.is_filled() && !best_level.is_empty() {
+                let resting = &mut best_level.orders[0];
+                let match_qty = order.remaining_quantity().min(resting.remaining_quantity());
+                let match_price = best_level.price;
+
+                // Fill both orders
+                order.fill(match_qty);
+                resting.fill(match_qty);
+
+                // Emit trade
+                if !outputs.is_full() {
+                    let (buyer_id, buyer_order_id, seller_id, seller_order_id) = match order.side {
+                        Side::Buy => (order.user_id, order.user_order_id, resting.user_id, resting.user_order_id),
+                        Side::Sell => (resting.user_id, resting.user_order_id, order.user_id, order.user_order_id),
+                    };
+
+                    outputs.push(OutputMessage::trade(
+                        self.symbol,
+                        buyer_id,
+                        buyer_order_id,
+                        seller_id,
+                        seller_order_id,
+                        match_price,
+                        match_qty,
+                    ));
+                }
+
+                // Remove filled resting order
+                if resting.is_filled() {
+                    best_level.orders.remove(0);
+                }
+            }
+
+            // Remove empty level
+            if best_level.is_empty() {
+                opposite_side.remove(0);
+            }
+        }
+
+        debug_assert!(iterations <= MAX_MATCH_ITERATIONS, "match loop exceeded max iterations");
+        Ok(())
+    }
+
+    fn insert_order(&mut self, order: Order) -> EngineResult<()> {
+        debug_assert!(!order.is_filled(), "inserting filled order");
+        debug_assert!(order.is_limit(), "inserting non-limit order");
+
+        let levels = match order.side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+
+        // Find insertion point
+        let pos = match order.side {
+            Side::Buy => {
+                // Bids: descending order (highest first)
+                levels.iter().position(|l| l.price < order.price)
+            }
+            Side::Sell => {
+                // Asks: ascending order (lowest first)
+                levels.iter().position(|l| l.price > order.price)
+            }
+        };
+
+        // Check if level exists at this price
+        let existing_pos = levels.iter().position(|l| l.price == order.price);
+
+        if let Some(idx) = existing_pos {
+            // Add to existing level
+            levels[idx].add_order(order)?;
+        } else {
+            // Create new level
+            if levels.is_full() {
+                return Err(EngineError::BookCapacityExceeded {
+                    symbol: self.symbol,
+                    side: order.side,
+                    current: levels.len(),
+                    max: MAX_PRICE_LEVELS,
+                });
+            }
+
+            let mut new_level = PriceLevel::new(order.price);
+            new_level.add_order(order)?;
+
+            let insert_pos = pos.unwrap_or(levels.len());
+            levels.insert(insert_pos, new_level);
         }
 
         Ok(())
     }
 
-    fn process_cancel(
-        &mut self,
-        msg: Cancel,
-        outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
-    ) {
-        debug_assert!(outputs.remaining_capacity() >= 3, "need space for cancel outputs");
-
-        let key = msg.key();
-
-        // Find which symbol this order belongs to
-        let symbol_opt = self.order_to_symbol.get(&key).copied();
-
-        match symbol_opt {
-            Some(symbol) => {
-                // Route to the correct book
-                if let Some(book) = self.order_books.get_mut(&symbol) {
-                    book.cancel_order(msg.user_id, msg.user_order_id, outputs);
-                } else {
-                    // Book doesn't exist (shouldn't happen)
-                    if !outputs.is_full() {
-                        outputs.push(OutputMessage::cancel_ack(
-                            msg.user_id,
-                            msg.user_order_id,
-                            symbol,
-                        ));
-                    }
-                }
-                // Remove from tracking
-                self.order_to_symbol.remove(&key);
-            }
-            None => {
-                // Order not found - still emit CancelAck
-                if !outputs.is_full() {
-                    outputs.push(OutputMessage::cancel_ack(
-                        msg.user_id,
-                        msg.user_order_id,
-                        UNKNOWN_SYMBOL,
-                    ));
-                }
-            }
-        }
-    }
-
-    fn process_flush(&mut self, outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>) {
-        // Flush each order book
-        for book in self.order_books.values_mut() {
-            book.flush(outputs);
-        }
-
-        // Clear tracking
-        self.order_to_symbol.clear();
-
-        debug_assert_eq!(self.order_to_symbol.len(), 0, "tracking must be cleared");
-    }
-
-    fn process_query_top_of_book(
+    fn emit_tob_updates(
         &self,
-        query: TopOfBookQuery,
+        old_bid: u32,
+        old_ask: u32,
         outputs: &mut ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>,
     ) {
-        let symbol = query.symbol;
+        let new_bid = self.best_bid_price();
+        let new_ask = self.best_ask_price();
 
-        let (bid_price, bid_qty, ask_price, ask_qty) =
-            if let Some(book) = self.order_books.get(&symbol) {
-                (
-                    book.best_bid_price(),
-                    book.best_bid_quantity(),
-                    book.best_ask_price(),
-                    book.best_ask_quantity(),
-                )
+        // Emit bid update if changed
+        if new_bid != old_bid && !outputs.is_full() {
+            if new_bid == 0 {
+                outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Buy));
             } else {
-                (0, 0, 0, 0)
-            };
-
-        // Emit bid side
-        if !outputs.is_full() {
-            if bid_price == 0 {
-                outputs.push(OutputMessage::top_of_book_eliminated(symbol, Side::Buy));
-            } else {
-                outputs.push(OutputMessage::top_of_book(symbol, Side::Buy, bid_price, bid_qty));
+                outputs.push(OutputMessage::top_of_book(
+                    self.symbol,
+                    Side::Buy,
+                    new_bid,
+                    self.best_bid_quantity(),
+                ));
             }
         }
 
-        // Emit ask side
-        if !outputs.is_full() {
-            if ask_price == 0 {
-                outputs.push(OutputMessage::top_of_book_eliminated(symbol, Side::Sell));
+        // Emit ask update if changed
+        if new_ask != old_ask && !outputs.is_full() {
+            if new_ask == 0 {
+                outputs.push(OutputMessage::top_of_book_eliminated(self.symbol, Side::Sell));
             } else {
-                outputs.push(OutputMessage::top_of_book(symbol, Side::Sell, ask_price, ask_qty));
+                outputs.push(OutputMessage::top_of_book(
+                    self.symbol,
+                    Side::Sell,
+                    new_ask,
+                    self.best_ask_quantity(),
+                ));
             }
         }
-    }
-
-    #[inline]
-    fn next_timestamp(&mut self) -> u64 {
-        let ts = self.timestamp_counter;
-        self.timestamp_counter += 1;
-        ts
-    }
-}
-
-impl Default for MatchingEngine {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -521,155 +504,53 @@ mod tests {
         Symbol::from_str(s)
     }
 
-    fn new_order(user_id: u32, order_id: u32, symbol: &str, price: u32, qty: u32, side: Side) -> InputMessage {
-        InputMessage::NewOrder(NewOrder::new(
-            user_id,
-            order_id,
-            sym(symbol),
-            price,
-            qty,
-            side,
-        ))
-    }
+    #[test]
+    fn test_price_level_basic() {
+        let mut level = PriceLevel::new(100);
+        assert!(level.is_empty());
+        assert_eq!(level.total_quantity(), 0);
 
-    fn cancel(user_id: u32, order_id: u32) -> InputMessage {
-        InputMessage::Cancel(Cancel::new(user_id, order_id))
-    }
+        let order = Order::new(1, 1, sym("TEST"), 100, 50, Side::Buy, 0);
+        level.add_order(order).unwrap();
 
-    fn new_outputs() -> ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER> {
-        ArrayVec::new()
+        assert!(!level.is_empty());
+        assert_eq!(level.total_quantity(), 50);
+        assert_eq!(level.order_count(), 1);
     }
 
     #[test]
-    fn test_strict_mode_rejects_unknown_symbol() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        let mut outputs = new_outputs();
+    fn test_order_book_basic() {
+        let mut book = OrderBook::new(sym("IBM"));
+        assert_eq!(book.best_bid_price(), 0);
+        assert_eq!(book.best_ask_price(), 0);
 
-        // Don't register IBM
-        let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
+        let mut outputs = ArrayVec::new();
+        let order = NewOrder::new(1, 1, sym("IBM"), 100, 50, Side::Buy);
+        book.add_order(&order, 0, &mut outputs).unwrap();
 
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EngineError::UnknownSymbol(_)));
-        assert!(outputs.iter().any(|m| m.is_reject()));
+        assert_eq!(book.best_bid_price(), 100);
+        assert_eq!(book.best_bid_quantity(), 50);
     }
 
     #[test]
-    fn test_registered_symbol_works() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        let mut outputs = new_outputs();
-        let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-
-        assert!(result.is_ok());
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
-    }
-
-    #[test]
-    fn test_lenient_mode_auto_creates() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::lenient());
-        let mut outputs = new_outputs();
-
-        // Should auto-create IBM
-        let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-
-        assert!(result.is_ok());
-        assert!(engine.is_registered(sym("IBM")));
-    }
-
-    #[test]
-    fn test_match() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
+    fn test_order_book_match() {
+        let mut book = OrderBook::new(sym("IBM"));
+        let mut outputs = ArrayVec::new();
 
         // Add bid
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
+        let bid = NewOrder::new(1, 1, sym("IBM"), 100, 50, Side::Buy);
+        book.add_order(&bid, 0, &mut outputs).unwrap();
+        outputs.clear();
 
         // Add matching ask
-        let outputs = engine.process(new_order(2, 1, "IBM", 100, 10, Side::Sell)).unwrap();
+        let ask = NewOrder::new(2, 1, sym("IBM"), 100, 50, Side::Sell);
+        book.add_order(&ask, 1, &mut outputs).unwrap();
 
         // Should have trade
-        let trade = outputs.iter().find(|m| m.is_trade());
-        assert!(trade.is_some());
+        assert!(outputs.iter().any(|m| m.is_trade()));
 
         // Book should be empty
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 0);
-        assert_eq!(engine.top_of_book(sym("IBM")).ask_price, 0);
-    }
-
-    #[test]
-    fn test_cancel() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
-        assert_eq!(engine.num_orders(), 1);
-
-        let outputs = engine.process(cancel(1, 1)).unwrap();
-
-        assert!(outputs.iter().any(|m| matches!(m, OutputMessage::CancelAck(_))));
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 0);
-        assert_eq!(engine.num_orders(), 0);
-    }
-
-    #[test]
-    fn test_multi_symbol() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbols([sym("IBM"), sym("AAPL")].into_iter()).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        engine.process(new_order(2, 1, "AAPL", 200, 20, Side::Buy)).unwrap();
-
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
-        assert_eq!(engine.top_of_book(sym("AAPL")).bid_price, 200);
-    }
-
-    #[test]
-    fn test_duplicate_order_id_rejected() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-
-        // Same user_id and order_id should be rejected
-        let result = engine.process(new_order(1, 1, "IBM", 101, 20, Side::Buy));
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EngineError::DuplicateOrderId { .. }));
-    }
-
-    #[test]
-    fn test_order_capacity() {
-        let mut config = EngineConfig::for_testing();
-        config.max_orders = 2;
-        let mut engine = MatchingEngine::with_config(config);
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        engine.process(new_order(2, 1, "IBM", 101, 10, Side::Buy)).unwrap();
-
-        // Third order should fail
-        let result = engine.process(new_order(3, 1, "IBM", 102, 10, Side::Buy));
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EngineError::OrderCapacityExceeded { .. }));
-    }
-
-    #[test]
-    fn test_market_orders_not_tracked() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        // Add liquidity
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Sell)).unwrap();
-        assert_eq!(engine.num_orders(), 1);
-
-        // Market order (price = 0) matches and doesn't add to tracking
-        engine.process(new_order(2, 1, "IBM", 0, 10, Side::Buy)).unwrap();
-
-        // Only the partially filled resting order should remain (if any)
-        // In this case, fully matched, so 0 orders
-        assert_eq!(engine.num_orders(), 0);
+        assert_eq!(book.best_bid_price(), 0);
+        assert_eq!(book.best_ask_price(), 0);
     }
 }

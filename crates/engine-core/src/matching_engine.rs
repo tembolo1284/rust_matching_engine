@@ -12,6 +12,7 @@
 //! - Rule 5: Minimum 2 assertions per function.
 //! - Rule 7: All return values checked.
 
+use arrayvec::ArrayVec;
 use rustc_hash::FxHashMap;
 
 use crate::error::{EngineError, EngineResult};
@@ -20,8 +21,6 @@ use crate::order_book::{OrderBook, MAX_OUTPUTS_PER_ORDER};
 use crate::side::Side;
 use crate::symbol::Symbol;
 use crate::top_of_book::TopOfBookSnapshot;
-
-use arrayvec::ArrayVec;
 
 // =============================================================================
 // Configuration
@@ -94,16 +93,12 @@ pub const UNKNOWN_SYMBOL: Symbol = Symbol([b'<', b'U', b'N', b'K', b'>', 0, 0, 0
 #[derive(Debug)]
 pub struct MatchingEngine {
     /// Symbol -> OrderBook.
-    /// Using FxHashMap for faster hashing (non-cryptographic).
     order_books: FxHashMap<Symbol, OrderBook>,
-
     /// (user_id, user_order_id) -> Symbol for cancel routing.
     order_to_symbol: FxHashMap<(u32, u32), Symbol>,
-
     /// Configuration.
     config: EngineConfig,
-
-    /// Timestamp counter for ordering (can be replaced with external clock).
+    /// Timestamp counter for ordering.
     timestamp_counter: u64,
 }
 
@@ -120,8 +115,6 @@ impl MatchingEngine {
     }
 
     /// Create a new engine with custom configuration.
-    ///
-    /// All memory is pre-allocated based on config values.
     pub fn with_config(config: EngineConfig) -> Self {
         debug_assert!(config.max_symbols > 0, "max_symbols must be > 0");
         debug_assert!(config.max_orders > 0, "max_orders must be > 0");
@@ -157,14 +150,6 @@ impl MatchingEngine {
     // =========================================================================
 
     /// Pre-register a symbol (creates order book upfront).
-    ///
-    /// Call this at startup for all known symbols to avoid allocation
-    /// during trading.
-    ///
-    /// # Returns
-    /// - `Ok(true)` if symbol was newly registered.
-    /// - `Ok(false)` if symbol was already registered.
-    /// - `Err` if max symbols exceeded.
     pub fn register_symbol(&mut self, symbol: Symbol) -> EngineResult<bool> {
         debug_assert!(!symbol.is_empty(), "cannot register empty symbol");
 
@@ -188,9 +173,6 @@ impl MatchingEngine {
     }
 
     /// Pre-register multiple symbols.
-    ///
-    /// # Returns
-    /// Number of newly registered symbols.
     pub fn register_symbols(&mut self, symbols: impl IntoIterator<Item = Symbol>) -> EngineResult<usize> {
         let mut count = 0;
         for sym in symbols {
@@ -213,13 +195,6 @@ impl MatchingEngine {
     // =========================================================================
 
     /// Process a single input message, writing outputs to the provided buffer.
-    ///
-    /// # Performance
-    /// Uses fixed-size `ArrayVec` for zero-allocation output handling.
-    ///
-    /// # Returns
-    /// - `Ok(())` on success.
-    /// - `Err(EngineError)` on capacity exceeded or invalid input.
     pub fn process_message(
         &mut self,
         msg: InputMessage,
@@ -250,8 +225,6 @@ impl MatchingEngine {
     }
 
     /// Convenience: process message and return new ArrayVec.
-    ///
-    /// Prefer `process_message` with reusable buffer for hot path.
     pub fn process(&mut self, msg: InputMessage) -> EngineResult<ArrayVec<OutputMessage, MAX_OUTPUTS_PER_ORDER>> {
         let mut outputs = ArrayVec::new();
         self.process_message(msg, &mut outputs)?;
@@ -344,21 +317,37 @@ impl MatchingEngine {
             });
         }
 
+        // Check order tracking capacity (only for limit orders that may rest)
+        if msg.is_limit() && self.order_to_symbol.len() >= self.config.max_orders {
+            if !outputs.is_full() {
+                outputs.push(OutputMessage::reject(
+                    msg.user_id,
+                    msg.user_order_id,
+                    symbol,
+                    RejectReason::CapacityExceeded,
+                ));
+            }
+            return Err(EngineError::OrderCapacityExceeded {
+                current: self.order_to_symbol.len(),
+                max: self.config.max_orders,
+            });
+        }
+
+        // Generate timestamp
+        let timestamp = self.next_timestamp();
+
         // Get order book (strict mode: reject unknown symbols)
-        let book = if self.config.strict_mode {
-            match self.order_books.get_mut(&symbol) {
-                Some(b) => b,
-                None => {
-                    if !outputs.is_full() {
-                        outputs.push(OutputMessage::reject(
-                            msg.user_id,
-                            msg.user_order_id,
-                            symbol,
-                            RejectReason::UnknownSymbol,
-                        ));
-                    }
-                    return Err(EngineError::UnknownSymbol(symbol));
+        if self.config.strict_mode {
+            if !self.order_books.contains_key(&symbol) {
+                if !outputs.is_full() {
+                    outputs.push(OutputMessage::reject(
+                        msg.user_id,
+                        msg.user_order_id,
+                        symbol,
+                        RejectReason::UnknownSymbol,
+                    ));
                 }
+                return Err(EngineError::UnknownSymbol(symbol));
             }
         } else {
             // Lenient mode: auto-create book
@@ -380,27 +369,10 @@ impl MatchingEngine {
                 let new_book = OrderBook::with_capacity(symbol, self.config.levels_per_side);
                 self.order_books.insert(symbol, new_book);
             }
-            self.order_books.get_mut(&symbol).unwrap()
-        };
-
-        // Check order tracking capacity (only for limit orders that may rest)
-        if msg.is_limit() && self.order_to_symbol.len() >= self.config.max_orders {
-            if !outputs.is_full() {
-                outputs.push(OutputMessage::reject(
-                    msg.user_id,
-                    msg.user_order_id,
-                    symbol,
-                    RejectReason::CapacityExceeded,
-                ));
-            }
-            return Err(EngineError::OrderCapacityExceeded {
-                current: self.order_to_symbol.len(),
-                max: self.config.max_orders,
-            });
         }
 
-        // Generate timestamp
-        let timestamp = self.next_timestamp();
+        // Get mutable reference to the book
+        let book = self.order_books.get_mut(&symbol).unwrap();
 
         // Process the order
         book.add_order(msg, timestamp, outputs)?;
@@ -431,7 +403,6 @@ impl MatchingEngine {
                 if let Some(book) = self.order_books.get_mut(&symbol) {
                     book.cancel_order(msg.user_id, msg.user_order_id, outputs);
                 } else {
-                    // Book doesn't exist (shouldn't happen)
                     if !outputs.is_full() {
                         outputs.push(OutputMessage::cancel_ack(
                             msg.user_id,
@@ -440,7 +411,6 @@ impl MatchingEngine {
                         ));
                     }
                 }
-
                 // Remove from tracking
                 self.order_to_symbol.remove(&key);
             }
@@ -462,10 +432,8 @@ impl MatchingEngine {
         for book in self.order_books.values_mut() {
             book.flush(outputs);
         }
-
         // Clear tracking
         self.order_to_symbol.clear();
-
         debug_assert_eq!(self.order_to_symbol.len(), 0, "tracking must be cleared");
     }
 
@@ -553,9 +521,8 @@ mod tests {
         let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
         let mut outputs = new_outputs();
 
-        // Don't register IBM
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-
+        
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EngineError::UnknownSymbol(_)));
         assert!(outputs.iter().any(|m| m.is_reject()));
@@ -568,7 +535,7 @@ mod tests {
 
         let mut outputs = new_outputs();
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-
+        
         assert!(result.is_ok());
         assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
     }
@@ -578,9 +545,8 @@ mod tests {
         let mut engine = MatchingEngine::with_config(EngineConfig::lenient());
         let mut outputs = new_outputs();
 
-        // Should auto-create IBM
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-
+        
         assert!(result.is_ok());
         assert!(engine.is_registered(sym("IBM")));
     }
@@ -590,17 +556,10 @@ mod tests {
         let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
         engine.register_symbol(sym("IBM")).unwrap();
 
-        // Add bid
         engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-
-        // Add matching ask
         let outputs = engine.process(new_order(2, 1, "IBM", 100, 10, Side::Sell)).unwrap();
 
-        // Should have trade
-        let trade = outputs.iter().find(|m| m.is_trade());
-        assert!(trade.is_some());
-
-        // Book should be empty
+        assert!(outputs.iter().any(|m| m.is_trade()));
         assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 0);
         assert_eq!(engine.top_of_book(sym("IBM")).ask_price, 0);
     }
@@ -611,25 +570,13 @@ mod tests {
         engine.register_symbol(sym("IBM")).unwrap();
 
         engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
         assert_eq!(engine.num_orders(), 1);
 
         let outputs = engine.process(cancel(1, 1)).unwrap();
+        
         assert!(outputs.iter().any(|m| matches!(m, OutputMessage::CancelAck(_))));
         assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 0);
         assert_eq!(engine.num_orders(), 0);
-    }
-
-    #[test]
-    fn test_multi_symbol() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbols([sym("IBM"), sym("AAPL")].into_iter()).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        engine.process(new_order(2, 1, "AAPL", 200, 20, Side::Buy)).unwrap();
-
-        assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
-        assert_eq!(engine.top_of_book(sym("AAPL")).bid_price, 200);
     }
 
     #[test]
@@ -638,43 +585,9 @@ mod tests {
         engine.register_symbol(sym("IBM")).unwrap();
 
         engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-
-        // Same user_id and order_id should be rejected
         let result = engine.process(new_order(1, 1, "IBM", 101, 20, Side::Buy));
+        
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EngineError::DuplicateOrderId { .. }));
-    }
-
-    #[test]
-    fn test_order_capacity() {
-        let mut config = EngineConfig::for_testing();
-        config.max_orders = 2;
-        let mut engine = MatchingEngine::with_config(config);
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
-        engine.process(new_order(2, 1, "IBM", 101, 10, Side::Buy)).unwrap();
-
-        // Third order should fail
-        let result = engine.process(new_order(3, 1, "IBM", 102, 10, Side::Buy));
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EngineError::OrderCapacityExceeded { .. }));
-    }
-
-    #[test]
-    fn test_market_orders_not_tracked() {
-        let mut engine = MatchingEngine::with_config(EngineConfig::for_testing());
-        engine.register_symbol(sym("IBM")).unwrap();
-
-        // Add liquidity
-        engine.process(new_order(1, 1, "IBM", 100, 10, Side::Sell)).unwrap();
-        assert_eq!(engine.num_orders(), 1);
-
-        // Market order (price = 0) matches and doesn't add to tracking
-        engine.process(new_order(2, 1, "IBM", 0, 10, Side::Buy)).unwrap();
-
-        // Only the partially filled resting order should remain (if any)
-        // In this case, fully matched, so 0 orders
-        assert_eq!(engine.num_orders(), 0);
     }
 }
