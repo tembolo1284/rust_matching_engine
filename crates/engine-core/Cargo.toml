@@ -8,7 +8,8 @@ keywords = ["trading", "matching-engine", "hft", "low-latency"]
 categories = ["algorithms", "finance"]
 
 [dependencies]
-# No dependencies for core - keep it minimal
+arrayvec = "0.7"
+rustc-hash = "1.1"
 
 [dev-dependencies]
 criterion = "0.5"

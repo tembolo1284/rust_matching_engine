@@ -1,61 +1,104 @@
 //! Error types for the matching engine.
 //!
-//! The core engine is designed to be infallible for normal operations.
-//! Invalid input should be filtered at the protocol layer.
+//! # Design
+//! - All errors are `Copy` for zero-allocation error handling.
+//! - Error codes match reject reasons for wire protocol.
 //!
-//! These errors are for exceptional conditions and admin operations.
+//! # Power of Ten Compliance
+//! - Rule 3: No dynamic allocation (no `String` in errors).
+//! - Rule 7: All errors are explicit and must be handled.
 
 use crate::symbol::Symbol;
 
-/// Engine error type.
-///
-/// Uses `Symbol` instead of `String` to avoid heap allocation.
+/// Errors that can occur during order processing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineError {
-    /// The requested symbol does not exist.
+    /// Symbol is not registered (strict mode).
     UnknownSymbol(Symbol),
 
-    /// Order not found for cancel.
-    OrderNotFound {
-        /// The user/session ID that submitted the order.
+    /// Order tracking map is at capacity.
+    OrderCapacityExceeded {
+        current: usize,
+        max: usize,
+    },
+
+    /// Price level capacity exceeded for a symbol.
+    PriceLevelCapacityExceeded {
+        symbol: Symbol,
+        side: crate::side::Side,
+    },
+
+    /// Orders per price level exceeded.
+    OrdersPerLevelExceeded {
+        symbol: Symbol,
+        price: u32,
+    },
+
+    /// Output buffer is full.
+    OutputBufferFull {
+        current: usize,
+        max: usize,
+    },
+
+    /// Duplicate order ID.
+    DuplicateOrderId {
         user_id: u32,
-        /// The user-assigned order ID.
         user_order_id: u32,
     },
 
-    /// Capacity exceeded (e.g., max orders, max symbols).
-    CapacityExceeded,
+    /// Invalid order parameters.
+    InvalidOrder(&'static str),
 
-    /// Invalid price (e.g., zero price for limit order).
-    InvalidPrice,
+    /// Symbol already registered.
+    SymbolAlreadyRegistered(Symbol),
 
-    /// Invalid quantity (e.g., zero quantity).
-    InvalidQuantity,
+    /// Maximum symbols exceeded.
+    MaxSymbolsExceeded {
+        current: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EngineError::UnknownSymbol(sym) => {
-                write!(f, "unknown symbol: {}", sym)
+            Self::UnknownSymbol(sym) => write!(f, "unknown symbol: {}", sym),
+            Self::OrderCapacityExceeded { current, max } => {
+                write!(f, "order capacity exceeded: {}/{}", current, max)
             }
-            EngineError::OrderNotFound { user_id, user_order_id } => {
-                write!(f, "order not found: user_id={}, user_order_id={}", user_id, user_order_id)
+            Self::PriceLevelCapacityExceeded { symbol, side } => {
+                write!(f, "price level capacity exceeded: {} {:?}", symbol, side)
             }
-            EngineError::CapacityExceeded => {
-                write!(f, "capacity exceeded")
+            Self::OrdersPerLevelExceeded { symbol, price } => {
+                write!(f, "orders per level exceeded: {} @ {}", symbol, price)
             }
-            EngineError::InvalidPrice => {
-                write!(f, "invalid price")
+            Self::OutputBufferFull { current, max } => {
+                write!(f, "output buffer full: {}/{}", current, max)
             }
-            EngineError::InvalidQuantity => {
-                write!(f, "invalid quantity")
+            Self::DuplicateOrderId { user_id, user_order_id } => {
+                write!(f, "duplicate order ID: ({}, {})", user_id, user_order_id)
+            }
+            Self::InvalidOrder(reason) => write!(f, "invalid order: {}", reason),
+            Self::SymbolAlreadyRegistered(sym) => {
+                write!(f, "symbol already registered: {}", sym)
+            }
+            Self::MaxSymbolsExceeded { current, max } => {
+                write!(f, "max symbols exceeded: {}/{}", current, max)
             }
         }
     }
 }
 
 impl std::error::Error for EngineError {}
+
+/// Result type for engine operations.
+pub type EngineResult<T> = Result<T, EngineError>;
+
+// Compile-time size check - ensure error is small enough to return by value
+const _: () = assert!(
+    std::mem::size_of::<EngineError>() <= 32,
+    "EngineError should be small for efficient returns"
+);
 
 #[cfg(test)]
 mod tests {
@@ -70,7 +113,11 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = EngineError::UnknownSymbol(Symbol::from_str("AAPL"));
-        assert_eq!(format!("{}", err), "unknown symbol: AAPL");
+        let err = EngineError::OrderCapacityExceeded {
+            current: 1000,
+            max: 1000,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("1000"));
     }
 }

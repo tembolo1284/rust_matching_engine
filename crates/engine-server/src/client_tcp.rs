@@ -207,7 +207,7 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
     let mut len_buf = [0u8; 4];
     let mut payload_buf = vec![0u8; 256];
 
-    eprintln!("{}: entering binary read loop", client_id);
+    // eprintln!("{}: entering binary read loop", client_id);
 
     loop {
         // Read 4-byte length prefix
@@ -223,8 +223,8 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
         let frame_len = u32::from_be_bytes(len_buf) as usize;
 
         // Debug: show length prefix
-        eprintln!("{}: len_prefix bytes: {:02X} {:02X} {:02X} {:02X} = {} bytes",
-            client_id, len_buf[0], len_buf[1], len_buf[2], len_buf[3], frame_len);
+        // eprintln!("{}: len_prefix bytes: {:02X} {:02X} {:02X} {:02X} = {} bytes",
+           //  client_id, len_buf[0], len_buf[1], len_buf[2], len_buf[3], frame_len);
 
         // Sanity check frame length
         if frame_len == 0 {

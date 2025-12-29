@@ -1,8 +1,9 @@
 //! Order type: Market or Limit.
 //!
 //! # Power of Ten Compliance
+//! - Rule 3: No dynamic allocation.
+//! - Rule 5: Assertions where meaningful.
 //! - Explicit `repr(u8)` for predictable 1-byte binary representation.
-//! - No hidden allocations or complex logic.
 
 /// Order type: Market or Limit.
 ///
@@ -27,7 +28,13 @@ pub enum OrderType {
     Limit = 1,
 }
 
+// Compile-time size verification
+const _: () = assert!(std::mem::size_of::<OrderType>() == 1, "OrderType must be 1 byte");
+
 impl OrderType {
+    /// All valid order types.
+    pub const ALL: [OrderType; 2] = [OrderType::Market, OrderType::Limit];
+
     /// Infer order type from price.
     /// - `price == 0` => Market
     /// - `price > 0`  => Limit
@@ -50,6 +57,16 @@ impl OrderType {
         }
     }
 
+    /// Parse from u8, panicking on invalid input.
+    #[inline]
+    pub const fn from_u8_unchecked(val: u8) -> Self {
+        match val {
+            0 => OrderType::Market,
+            1 => OrderType::Limit,
+            _ => panic!("invalid order type value"),
+        }
+    }
+
     /// Convert to u8 for wire format.
     #[inline]
     pub const fn to_u8(self) -> u8 {
@@ -67,6 +84,13 @@ impl OrderType {
     pub const fn is_limit(self) -> bool {
         matches!(self, OrderType::Limit)
     }
+
+    /// Check if this order type can rest in the book.
+    /// Only limit orders can rest; market orders execute immediately or cancel.
+    #[inline]
+    pub const fn can_rest(self) -> bool {
+        self.is_limit()
+    }
 }
 
 #[cfg(test)]
@@ -79,15 +103,34 @@ mod tests {
     }
 
     #[test]
+    fn test_order_type_values() {
+        assert_eq!(OrderType::Market as u8, 0);
+        assert_eq!(OrderType::Limit as u8, 1);
+    }
+
+    #[test]
     fn test_order_type_from_price() {
         assert_eq!(OrderType::from_price(0), OrderType::Market);
-        assert_eq!(OrderType::from_price(100), OrderType::Limit);
         assert_eq!(OrderType::from_price(1), OrderType::Limit);
+        assert_eq!(OrderType::from_price(100), OrderType::Limit);
+        assert_eq!(OrderType::from_price(u32::MAX), OrderType::Limit);
     }
 
     #[test]
     fn test_order_type_u8_roundtrip() {
         assert_eq!(OrderType::from_u8(OrderType::Market.to_u8()), Some(OrderType::Market));
         assert_eq!(OrderType::from_u8(OrderType::Limit.to_u8()), Some(OrderType::Limit));
+        assert_eq!(OrderType::from_u8(2), None);
+    }
+
+    #[test]
+    fn test_order_type_predicates() {
+        assert!(OrderType::Market.is_market());
+        assert!(!OrderType::Market.is_limit());
+        assert!(!OrderType::Market.can_rest());
+
+        assert!(OrderType::Limit.is_limit());
+        assert!(!OrderType::Limit.is_market());
+        assert!(OrderType::Limit.can_rest());
     }
 }
