@@ -49,7 +49,8 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use engine_core::{
-    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Side, Symbol, Trade,
+    Ack, Cancel, CancelAck, InputMessage, NewOrder, OutputMessage, Reject, RejectReason,
+    Side, Symbol, Trade,
 };
 
 // =============================================================================
@@ -85,13 +86,23 @@ pub enum FixError {
     /// Missing required field.
     MissingField(&'static str),
     /// Invalid field value.
-    InvalidField { tag: u32, reason: &'static str },
+    InvalidField {
+        /// The FIX tag number.
+        tag: u32,
+        /// Description of why it's invalid.
+        reason: &'static str,
+    },
     /// Invalid message type.
     InvalidMsgType(String),
     /// Parse error.
     ParseError(String),
     /// Checksum mismatch.
-    ChecksumMismatch { expected: u8, got: u8 },
+    ChecksumMismatch {
+        /// Expected checksum.
+        expected: u8,
+        /// Actual checksum.
+        got: u8,
+    },
     /// Message too large.
     MessageTooLarge,
 }
@@ -127,67 +138,113 @@ const MAX_FIX_MSG_SIZE: usize = 4096;
 
 // FIX Tags
 mod tags {
+    /// BeginString (8).
     pub const BEGIN_STRING: u32 = 8;
+    /// BodyLength (9).
     pub const BODY_LENGTH: u32 = 9;
+    /// MsgType (35).
     pub const MSG_TYPE: u32 = 35;
+    /// SenderCompID (49).
     pub const SENDER_COMP_ID: u32 = 49;
+    /// TargetCompID (56).
     pub const TARGET_COMP_ID: u32 = 56;
+    /// MsgSeqNum (34).
     pub const MSG_SEQ_NUM: u32 = 34;
+    /// SendingTime (52).
     pub const SENDING_TIME: u32 = 52;
+    /// Checksum (10).
     pub const CHECKSUM: u32 = 10;
 
+    /// ClOrdID (11).
     pub const CL_ORD_ID: u32 = 11;
+    /// OrigClOrdID (41).
     pub const ORIG_CL_ORD_ID: u32 = 41;
+    /// OrderID (37).
     pub const ORDER_ID: u32 = 37;
+    /// ExecID (17).
     pub const EXEC_ID: u32 = 17;
+    /// ExecType (150).
     pub const EXEC_TYPE: u32 = 150;
+    /// OrdStatus (39).
     pub const ORD_STATUS: u32 = 39;
+    /// Symbol (55).
     pub const SYMBOL: u32 = 55;
+    /// Side (54).
     pub const SIDE: u32 = 54;
+    /// OrderQty (38).
     pub const ORDER_QTY: u32 = 38;
+    /// OrdType (40).
     pub const ORD_TYPE: u32 = 40;
+    /// Price (44).
     pub const PRICE: u32 = 44;
+    /// LastPx (31).
     pub const LAST_PX: u32 = 31;
+    /// LastQty (32).
     pub const LAST_QTY: u32 = 32;
+    /// LeavesQty (151).
     pub const LEAVES_QTY: u32 = 151;
+    /// CumQty (14).
     pub const CUM_QTY: u32 = 14;
+    /// AvgPx (6).
     pub const AVG_PX: u32 = 6;
+    /// TransactTime (60).
     pub const TRANSACT_TIME: u32 = 60;
+    /// OrdRejReason (103).
+    pub const ORD_REJ_REASON: u32 = 103;
+    /// Text (58).
+    pub const TEXT: u32 = 58;
 }
 
 // FIX Message Types
 mod msg_types {
+    /// New Order Single.
     pub const NEW_ORDER_SINGLE: &str = "D";
+    /// Order Cancel Request.
     pub const ORDER_CANCEL_REQUEST: &str = "F";
+    /// Execution Report.
     pub const EXECUTION_REPORT: &str = "8";
     // pub const ORDER_CANCEL_REJECT: &str = "9";
 }
 
 // FIX Side values
 mod fix_side {
+    /// Buy side.
     pub const BUY: char = '1';
+    /// Sell side.
     pub const SELL: char = '2';
 }
 
 // FIX OrdType values
 mod fix_ord_type {
+    /// Market order.
     pub const MARKET: char = '1';
+    /// Limit order.
     pub const LIMIT: char = '2';
 }
 
 // FIX ExecType values
 mod fix_exec_type {
+    /// New order.
     pub const NEW: char = '0';
+    /// Canceled.
     pub const CANCELED: char = '4';
+    /// Trade (fill).
     pub const TRADE: char = 'F';
+    /// Rejected.
+    pub const REJECTED: char = '8';
 }
 
 // FIX OrdStatus values
 mod fix_ord_status {
+    /// New.
     pub const NEW: char = '0';
     // pub const PARTIALLY_FILLED: char = '1';
+    /// Filled.
     pub const FILLED: char = '2';
+    /// Canceled.
     pub const CANCELED: char = '4';
+    /// Rejected.
+    pub const REJECTED: char = '8';
 }
 
 // =============================================================================
@@ -242,6 +299,7 @@ impl FixEncoder {
                 // Could map to MarketDataSnapshotFullRefresh
                 Err(FixError::InvalidMsgType("TopOfBook".to_string()))
             }
+            OutputMessage::Reject(reject) => self.encode_reject(reject),
         }
     }
 
@@ -432,6 +490,58 @@ impl FixEncoder {
         write_field(&mut body, tags::LEAVES_QTY, "0");
         write_field(&mut body, tags::CUM_QTY, &trade.quantity.to_string());
         write_field(&mut body, tags::AVG_PX, &price_str);
+
+        self.build_message(&body)
+    }
+
+    /// Encode an Execution Report for Reject (35=8, ExecType=8, OrdStatus=8).
+    fn encode_reject(&mut self, reject: &Reject) -> Result<Vec<u8>, FixError> {
+        self.buf.clear();
+
+        let mut body = Vec::with_capacity(256);
+
+        write_field(&mut body, tags::MSG_TYPE, msg_types::EXECUTION_REPORT);
+        write_field(&mut body, tags::ORDER_ID, &reject.user_order_id.to_string());
+        write_field(&mut body, tags::CL_ORD_ID, &reject.user_order_id.to_string());
+        write_field(&mut body, tags::EXEC_ID, &format!("E{}", self.seq_num));
+
+        // ExecType = 8 (Rejected)
+        write_field(
+            &mut body,
+            tags::EXEC_TYPE,
+            &fix_exec_type::REJECTED.to_string(),
+        );
+
+        // OrdStatus = 8 (Rejected)
+        write_field(
+            &mut body,
+            tags::ORD_STATUS,
+            &fix_ord_status::REJECTED.to_string(),
+        );
+
+        write_field(&mut body, tags::SYMBOL, reject.symbol.as_str());
+        write_field(&mut body, tags::SIDE, &fix_side::BUY.to_string());
+        write_field(&mut body, tags::LEAVES_QTY, "0");
+        write_field(&mut body, tags::CUM_QTY, "0");
+        write_field(&mut body, tags::AVG_PX, "0");
+
+        // OrdRejReason (tag 103)
+        let reject_reason = match reject.reason {
+            RejectReason::UnknownSymbol => "1",      // Unknown symbol
+            RejectReason::CapacityExceeded => "4",   // Too late to enter
+            RejectReason::InvalidOrder => "0",       // Broker option
+            RejectReason::DuplicateOrderId => "6",   // Duplicate Order
+        };
+        write_field(&mut body, tags::ORD_REJ_REASON, reject_reason);
+
+        // Text (tag 58) - human readable reason
+        let text = match reject.reason {
+            RejectReason::UnknownSymbol => "Unknown symbol",
+            RejectReason::CapacityExceeded => "Capacity exceeded",
+            RejectReason::InvalidOrder => "Invalid order",
+            RejectReason::DuplicateOrderId => "Duplicate order ID",
+        };
+        write_field(&mut body, tags::TEXT, text);
 
         self.build_message(&body)
     }
@@ -679,6 +789,21 @@ impl FixDecoder {
                     quantity,
                 ))
             }
+            Some(fix_exec_type::REJECTED) => {
+                // Decode rejection
+                let reason = if let Some(reason_str) = fields.get(&tags::ORD_REJ_REASON) {
+                    match reason_str.as_str() {
+                        "1" => RejectReason::UnknownSymbol,
+                        "4" => RejectReason::CapacityExceeded,
+                        "6" => RejectReason::DuplicateOrderId,
+                        _ => RejectReason::InvalidOrder,
+                    }
+                } else {
+                    RejectReason::InvalidOrder
+                };
+
+                Ok(OutputMessage::reject(user_id, user_order_id, symbol, reason))
+            }
             _ => Err(FixError::InvalidField {
                 tag: tags::EXEC_TYPE,
                 reason: "unknown exec type",
@@ -853,6 +978,29 @@ mod tests {
         assert!(msg_str.contains("35=D"));
         assert!(msg_str.contains("40=1")); // Market
         assert!(!msg_str.contains("44=")); // No price
+    }
+
+    #[test]
+    fn test_encode_reject() {
+        let mut encoder = FixEncoder::new(FixVersion::Fix44, "SERVER", "CLIENT");
+        let reject = OutputMessage::reject(
+            1,
+            100,
+            Symbol::from_str("IBM"),
+            RejectReason::UnknownSymbol,
+        );
+
+        let result = encoder.encode_output(&reject);
+        assert!(result.is_ok());
+
+        let msg = result.unwrap();
+        let msg_str = String::from_utf8_lossy(&msg);
+
+        assert!(msg_str.contains("35=8"));      // Execution Report
+        assert!(msg_str.contains("150=8"));     // ExecType = Rejected
+        assert!(msg_str.contains("39=8"));      // OrdStatus = Rejected
+        assert!(msg_str.contains("103=1"));     // OrdRejReason = Unknown symbol
+        assert!(msg_str.contains("58=Unknown symbol")); // Text
     }
 
     #[test]

@@ -18,43 +18,58 @@ pub enum EngineError {
 
     /// Order tracking map is at capacity.
     OrderCapacityExceeded {
+        /// Current number of orders.
         current: usize,
+        /// Maximum allowed orders.
         max: usize,
     },
 
     /// Price level capacity exceeded for a symbol.
     PriceLevelCapacityExceeded {
+        /// The symbol that hit capacity.
         symbol: Symbol,
+        /// The side (buy/sell) that hit capacity.
         side: crate::side::Side,
     },
 
     /// Orders per price level exceeded.
     OrdersPerLevelExceeded {
+        /// The symbol.
         symbol: Symbol,
+        /// The price level that is full.
         price: u32,
     },
 
     /// Output buffer is full.
     OutputBufferFull {
+        /// Current number of outputs.
         current: usize,
+        /// Maximum buffer size.
         max: usize,
     },
 
     /// Duplicate order ID.
     DuplicateOrderId {
+        /// The user ID.
         user_id: u32,
+        /// The duplicate order ID.
         user_order_id: u32,
     },
 
     /// Invalid order parameters.
-    InvalidOrder(&'static str),
+    InvalidOrder(
+        /// Description of what's invalid.
+        &'static str
+    ),
 
     /// Symbol already registered.
     SymbolAlreadyRegistered(Symbol),
 
     /// Maximum symbols exceeded.
     MaxSymbolsExceeded {
+        /// Current number of symbols.
         current: usize,
+        /// Maximum allowed symbols.
         max: usize,
     },
 }

@@ -1,8 +1,4 @@
 //! Server capability discovery.
-//!
-//! Automatically detects:
-//! - Transport: TCP or UDP
-//! - Protocol: CSV, Binary, or FIX
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -19,13 +15,9 @@ use crate::types::{Protocol, Transport};
 /// Discovered server capabilities.
 #[derive(Debug, Clone)]
 pub struct ServerCapabilities {
-    /// Server address.
     pub addr: SocketAddr,
-    /// Detected transport.
     pub transport: Transport,
-    /// Detected protocol.
     pub protocol: Protocol,
-    /// Server responded to probe.
     pub responsive: bool,
 }
 
@@ -40,8 +32,6 @@ impl std::fmt::Display for ServerCapabilities {
 }
 
 /// Discover server capabilities by probing.
-///
-/// Tries TCP first, then UDP. Sends a probe message and analyzes response.
 pub async fn discover_server(addr: &str) -> Result<ServerCapabilities> {
     let socket_addr: SocketAddr = addr.parse()?;
 
@@ -58,11 +48,8 @@ pub async fn discover_server(addr: &str) -> Result<ServerCapabilities> {
     Err(anyhow!("Could not connect to server at {}", addr))
 }
 
-/// Try to discover via TCP.
 async fn discover_tcp(addr: SocketAddr) -> Result<ServerCapabilities> {
-    // Connect with timeout
     let stream = timeout(Duration::from_secs(5), TcpStream::connect(addr)).await??;
-
     stream.set_nodelay(true)?;
     
     let protocol = probe_protocol_tcp(stream).await?;
@@ -75,20 +62,15 @@ async fn discover_tcp(addr: SocketAddr) -> Result<ServerCapabilities> {
     })
 }
 
-/// Probe TCP connection to determine protocol.
 async fn probe_protocol_tcp(mut stream: TcpStream) -> Result<Protocol> {
-    // Send a CSV probe (works with all protocols as it's human readable)
-    // Using QueryTopOfBook which is harmless
     let probe = b"Q, PROBE\n";
     stream.write_all(probe).await?;
     stream.flush().await?;
 
-    // Read response with timeout
     let mut buf = [0u8; 256];
     let n = timeout(Duration::from_secs(2), stream.read(&mut buf)).await??;
 
     if n == 0 {
-        // Server didn't respond, but connected - assume CSV
         return Ok(Protocol::Csv);
     }
 
@@ -96,17 +78,13 @@ async fn probe_protocol_tcp(mut stream: TcpStream) -> Result<Protocol> {
     Ok(detect_protocol_from_response(response))
 }
 
-/// Try to discover via UDP.
 async fn discover_udp(addr: SocketAddr) -> Result<ServerCapabilities> {
-    // Bind to any local port
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(addr).await?;
 
-    // Send probe
     let probe = b"Q, PROBE\n";
     socket.send(probe).await?;
 
-    // Wait for response
     let mut buf = [0u8; 256];
     let n = timeout(Duration::from_secs(2), socket.recv(&mut buf)).await??;
 
@@ -125,7 +103,6 @@ async fn discover_udp(addr: SocketAddr) -> Result<ServerCapabilities> {
     })
 }
 
-/// Detect protocol from server response.
 fn detect_protocol_from_response(data: &[u8]) -> Protocol {
     if data.is_empty() {
         return Protocol::Csv;
@@ -134,8 +111,8 @@ fn detect_protocol_from_response(data: &[u8]) -> Protocol {
     // Check for binary: magic byte 'M' followed by valid message type
     if data.len() >= 2 && data[0] == MAGIC_BYTE {
         let msg_type = data[1];
-        // Valid output types: 'A' (Ack), 'X' (CancelAck), 'T' (Trade), 'B' (TopOfBook)
-        if matches!(msg_type, b'A' | b'X' | b'T' | b'B') {
+        // Valid output types: 'A' (Ack), 'X' (CancelAck), 'T' (Trade), 'B' (TopOfBook), 'R' (Reject)
+        if matches!(msg_type, b'A' | b'X' | b'T' | b'B' | b'R') {
             return Protocol::Binary;
         }
     }
@@ -151,18 +128,16 @@ fn detect_protocol_from_response(data: &[u8]) -> Protocol {
         if len > 0 && len < 1000 && data.len() >= 6 {
             if data[4] == MAGIC_BYTE {
                 let msg_type = data[5];
-                if matches!(msg_type, b'A' | b'X' | b'T' | b'B') {
+                if matches!(msg_type, b'A' | b'X' | b'T' | b'B' | b'R') {
                     return Protocol::Binary;
                 }
             }
         }
     }
 
-    // Default to CSV
     Protocol::Csv
 }
 
-/// Discover and print results.
 pub async fn discover_and_print(addr: &str) -> Result<ServerCapabilities> {
     println!("Discovering server at {}...", addr);
 
@@ -192,8 +167,8 @@ mod tests {
 
     #[test]
     fn test_detect_binary() {
-        let mut response = MAGIC_BYTES.to_vec();
-        response.extend_from_slice(&[0x01, 0x0A, 0x00, 0x10]);
+        // FIXED: Use MAGIC_BYTE, not MAGIC_BYTES
+        let response = vec![MAGIC_BYTE, b'A', 0x01, 0x0A, 0x00, 0x10];
         assert_eq!(detect_protocol_from_response(&response), Protocol::Binary);
     }
 
@@ -205,9 +180,10 @@ mod tests {
 
     #[test]
     fn test_detect_length_prefixed_binary() {
+        // FIXED: Use MAGIC_BYTE
         let mut response = vec![0x00, 0x00, 0x00, 0x20]; // length = 32
-        response.extend_from_slice(&MAGIC_BYTES);
-        response.extend_from_slice(&[0x01, 0x0A, 0x00, 0x10]);
+        response.push(MAGIC_BYTE);
+        response.extend_from_slice(&[b'T', 0x00, 0x10]);
         assert_eq!(detect_protocol_from_response(&response), Protocol::Binary);
     }
 }

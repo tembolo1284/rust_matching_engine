@@ -1,10 +1,19 @@
 //! TCP client handler supporting CSV, Binary, and FIX protocols.
+//!
+//! # Power of Ten Compliance
+//! - Rule 2: Bounded read buffers.
+//! - Rule 3: Pre-allocated encode buffers.
+//! - Rule 5: Assertions on buffer operations.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use engine_core::{InputMessage, OutputMessage};
-use engine_protocol::{binary_codec, csv_codec, fix_codec};
+use engine_protocol::{
+    binary_codec::{self, encode_output_to_buf, MAX_OUTPUT_WIRE_SIZE},
+    csv_codec,
+    fix_codec,
+};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -17,6 +26,15 @@ use crate::types::{
     ClientId, ClientInfo, ClientRegistry, EngineRequest, EngineTx, Protocol, Transport,
 };
 
+/// Maximum CSV line length.
+const MAX_CSV_LINE_LEN: usize = 256;
+
+/// Maximum binary frame size.
+const MAX_BINARY_FRAME_SIZE: usize = 256;
+
+/// Maximum FIX message size.
+const MAX_FIX_MESSAGE_SIZE: usize = 8192;
+
 /// Handle a single TCP client connection.
 pub async fn handle_tcp_client(
     client_id: ClientId,
@@ -26,10 +44,11 @@ pub async fn handle_tcp_client(
     engine_tx: EngineTx,
     metrics: Arc<Metrics>,
 ) {
-    let peer_addr = stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap());
+    let peer_addr = stream
+        .peer_addr()
+        .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
 
-    Metrics::inc(&metrics.tcp_connections_total);
-    Metrics::inc(&metrics.tcp_connections_active);
+    metrics.record_tcp_connect();
 
     // Set TCP options
     let _ = stream.set_nodelay(true);
@@ -39,18 +58,10 @@ pub async fn handle_tcp_client(
     let mut reader = BufReader::with_capacity(config.tcp_read_buffer_size, read_half);
 
     // Peek to detect protocol
-    let mut peek_buf = [0u8; 8];
     let protocol = match reader.fill_buf().await {
         Ok(buf) => {
             let len = buf.len().min(8);
-            peek_buf[..len].copy_from_slice(&buf[..len]);
-            let hex: String = peek_buf[..len]
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            eprintln!("{}: peeked {} bytes: {}", client_id, len, hex);
-            detect_protocol(&peek_buf[..len])
+            detect_protocol(&buf[..len])
         }
         Err(_) => Protocol::Csv,
     };
@@ -77,7 +88,9 @@ pub async fn handle_tcp_client(
     let write_timeout = config.write_timeout;
 
     let writer_handle = tokio::spawn(async move {
-        let mut encoder = binary_codec::BinaryEncoder::new();
+        // Pre-allocated buffers for zero-allocation encoding
+        let mut binary_buf = [0u8; 4 + MAX_OUTPUT_WIRE_SIZE]; // len prefix + message
+        let mut csv_buf = String::with_capacity(128);
         let mut fix_encoder = fix_codec::FixEncoder::new(
             fix_codec::FixVersion::Fix44,
             "ENGINE",
@@ -87,19 +100,19 @@ pub async fn handle_tcp_client(
         while let Some(msg) = out_rx.recv().await {
             let result = match writer_protocol {
                 Protocol::Csv => {
-                    let line = csv_codec::format_output_csv(&msg);
-                    let data = format!("{}\n", line);
-                    timeout(write_timeout, write_half.write_all(data.as_bytes())).await
+                    csv_buf.clear();
+                    csv_codec::format_output_into(&msg, &mut csv_buf);
+                    csv_buf.push('\n');
+                    timeout(write_timeout, write_half.write_all(csv_buf.as_bytes())).await
                 }
                 Protocol::Binary => {
-                    match encoder.encode_output(&msg) {
-                        Ok(frame) => {
-                            // Length prefix + frame
-                            let len = (frame.len() as u32).to_be_bytes();
-                            let mut buf = Vec::with_capacity(4 + frame.len());
-                            buf.extend_from_slice(&len);
-                            buf.extend_from_slice(frame);
-                            timeout(write_timeout, write_half.write_all(&buf)).await
+                    // Encode message after length prefix
+                    match encode_output_to_buf(&msg, &mut binary_buf[4..]) {
+                        Ok(msg_len) => {
+                            // Write length prefix
+                            binary_buf[0..4].copy_from_slice(&(msg_len as u32).to_be_bytes());
+                            let total_len = 4 + msg_len;
+                            timeout(write_timeout, write_half.write_all(&binary_buf[..total_len])).await
                         }
                         Err(_) => continue,
                     }
@@ -115,9 +128,9 @@ pub async fn handle_tcp_client(
             };
 
             match result {
-                Ok(Ok(_)) => Metrics::inc(&writer_metrics.messages_sent),
+                Ok(Ok(_)) => writer_metrics.record_message_sent(),
                 _ => {
-                    Metrics::inc(&writer_metrics.send_errors);
+                    writer_metrics.record_send_error();
                     break;
                 }
             }
@@ -138,14 +151,16 @@ pub async fn handle_tcp_client(
     };
 
     if let Err(e) = read_result {
-        eprintln!("{}: read error: {}", client_id, e);
+        if !e.contains("EOF") && !e.contains("timeout") {
+            eprintln!("{}: read error: {}", client_id, e);
+        }
     }
 
     // Cleanup
     clients.unregister(client_id).await;
     writer_handle.abort();
 
-    Metrics::dec(&metrics.tcp_connections_active);
+    metrics.record_tcp_disconnect();
     eprintln!("{}: disconnected", client_id);
 }
 
@@ -156,7 +171,8 @@ async fn read_csv_loop<R: AsyncBufReadExt + Unpin>(
     metrics: &Arc<Metrics>,
     read_timeout: Duration,
 ) -> Result<(), String> {
-    let mut line = String::with_capacity(256);
+    // Pre-allocated line buffer
+    let mut line = String::with_capacity(MAX_CSV_LINE_LEN);
 
     loop {
         line.clear();
@@ -164,8 +180,13 @@ async fn read_csv_loop<R: AsyncBufReadExt + Unpin>(
         let read_result = timeout(read_timeout, reader.read_line(&mut line)).await;
 
         match read_result {
-            Ok(Ok(0)) => return Ok(()), // EOF
+            Ok(Ok(0)) => return Err("EOF".to_string()),
             Ok(Ok(_)) => {
+                // Truncate if too long
+                if line.len() > MAX_CSV_LINE_LEN {
+                    line.truncate(MAX_CSV_LINE_LEN);
+                }
+
                 let trimmed = line.trim();
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     continue;
@@ -185,8 +206,7 @@ async fn read_csv_loop<R: AsyncBufReadExt + Unpin>(
                         }
                     }
                     None => {
-                        Metrics::inc(&metrics.decode_errors);
-                        eprintln!("{}: invalid CSV: {}", client_id, trimmed);
+                        metrics.record_decode_error();
                     }
                 }
             }
@@ -203,11 +223,8 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
     metrics: &Arc<Metrics>,
     read_timeout: Duration,
 ) -> Result<(), String> {
-    let decoder = binary_codec::BinaryDecoder::new();
     let mut len_buf = [0u8; 4];
-    let mut payload_buf = vec![0u8; 256];
-
-    // eprintln!("{}: entering binary read loop", client_id);
+    let mut payload_buf = [0u8; MAX_BINARY_FRAME_SIZE];
 
     loop {
         // Read 4-byte length prefix
@@ -215,29 +232,21 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
 
         match len_result {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err("EOF".to_string())
+            }
             Ok(Err(e)) => return Err(format!("read error: {}", e)),
             Err(_) => return Err("read timeout".to_string()),
         }
 
         let frame_len = u32::from_be_bytes(len_buf) as usize;
 
-        // Debug: show length prefix
-        // eprintln!("{}: len_prefix bytes: {:02X} {:02X} {:02X} {:02X} = {} bytes",
-           //  client_id, len_buf[0], len_buf[1], len_buf[2], len_buf[3], frame_len);
-
-        // Sanity check frame length
+        // Sanity check
         if frame_len == 0 {
-            eprintln!("{}: zero-length frame, skipping", client_id);
             continue;
         }
-        if frame_len > 65536 {
+        if frame_len > MAX_BINARY_FRAME_SIZE {
             return Err(format!("frame too large: {} bytes", frame_len));
-        }
-
-        // Resize buffer if needed
-        if payload_buf.len() < frame_len {
-            payload_buf.resize(frame_len, 0);
         }
 
         // Read frame payload
@@ -254,8 +263,8 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
         }
 
         // Decode message
-        match decoder.decode_input(&payload_buf[..frame_len]) {
-            Ok(msg) => {
+        match binary_codec::decode_input(&payload_buf[..frame_len]) {
+            Ok((msg, _)) => {
                 let user_id = extract_user_id(&msg);
                 let request = EngineRequest {
                     client_id,
@@ -268,15 +277,8 @@ async fn read_binary_loop<R: AsyncReadExt + Unpin>(
                 }
             }
             Err(e) => {
-                Metrics::inc(&metrics.decode_errors);
-                // Debug: show raw bytes for diagnosis
-                let hex: String = payload_buf[..frame_len.min(32)]
-                    .iter()
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                metrics.record_decode_error();
                 eprintln!("{}: decode error: {:?}", client_id, e);
-                eprintln!("{}: raw bytes (len={}): {}", client_id, frame_len, hex);
             }
         }
     }
@@ -290,17 +292,15 @@ async fn read_fix_loop<R: AsyncBufReadExt + Unpin>(
     read_timeout: Duration,
 ) -> Result<(), String> {
     let decoder = fix_codec::FixDecoder::new(fix_codec::FixVersion::Fix44);
-    let mut buf = Vec::with_capacity(4096);
+    let mut buf = Vec::with_capacity(MAX_FIX_MESSAGE_SIZE);
 
     loop {
         buf.clear();
 
-        // Read until SOH (0x01) delimiter - FIX messages end with checksum field
-        // For simplicity, read line-by-line and look for complete messages
         let read_result = timeout(read_timeout, read_fix_message(reader, &mut buf)).await;
 
         match read_result {
-            Ok(Ok(0)) => return Ok(()), // EOF
+            Ok(Ok(0)) => return Err("EOF".to_string()),
             Ok(Ok(_)) => {
                 match decoder.decode_input(&buf) {
                     Ok(msg) => {
@@ -316,7 +316,7 @@ async fn read_fix_loop<R: AsyncBufReadExt + Unpin>(
                         }
                     }
                     Err(e) => {
-                        Metrics::inc(&metrics.decode_errors);
+                        metrics.record_decode_error();
                         eprintln!("{}: FIX decode error: {:?}", client_id, e);
                     }
                 }
@@ -332,36 +332,29 @@ async fn read_fix_message<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
-    // FIX messages: 8=FIX.4.4|9=len|...|10=xxx|
-    // Read byte by byte looking for 10=XXX pattern followed by SOH
     let mut total = 0;
     let mut temp = [0u8; 1];
 
     loop {
         let n = reader.read(&mut temp).await?;
         if n == 0 {
-            return Ok(0); // EOF
+            return Ok(0);
         }
 
         buf.push(temp[0]);
         total += 1;
 
-        // Check if we have a complete message (ends with 10=XXX<SOH>)
-        if buf.len() >= 7 {
-            let len = buf.len();
-            // Look for |10=XXX| pattern
-            if buf[len - 1] == 0x01 && len >= 7 {
-                // Check for 10= pattern
-                if let Some(pos) = buf.windows(3).rposition(|w| w == b"10=") {
-                    if pos + 7 <= len {
-                        return Ok(total);
-                    }
+        // Check for complete message (ends with 10=XXX<SOH>)
+        if buf.len() >= 7 && buf[buf.len() - 1] == 0x01 {
+            if let Some(pos) = buf.windows(3).rposition(|w| w == b"10=") {
+                if pos + 7 <= buf.len() {
+                    return Ok(total);
                 }
             }
         }
 
         // Safety limit
-        if total > 8192 {
+        if total > MAX_FIX_MESSAGE_SIZE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "FIX message too large",
@@ -371,6 +364,7 @@ async fn read_fix_message<R: AsyncReadExt + Unpin>(
 }
 
 /// Extract user_id from an input message for routing.
+#[inline]
 fn extract_user_id(msg: &InputMessage) -> u32 {
     match msg {
         InputMessage::NewOrder(order) => order.user_id,

@@ -1,33 +1,45 @@
-//! Multi-protocol TCP/UDP matching engine server.
+//! Multi-protocol matching engine server.
 //!
-//! # Supported Transports & Protocols
+//! # Architecture
 //!
-//! | Transport | Protocol | Direction | Use Case |
-//! |-----------|----------|-----------|----------|
-//! | TCP | CSV | Bidirectional | Testing, netcat |
-//! | TCP | Binary | Bidirectional | High-performance clients |
-//! | TCP | FIX 4.2/4.4 | Bidirectional | Institutional connectivity |
-//! | UDP | CSV | Bidirectional | Simple UDP clients |
-//! | UDP | Binary | Bidirectional | Ultra-low latency |
-//! | Multicast | Binary | Server → Clients | Market data broadcast |
+//! ```text
+//! ┌───────────────┐     ┌───────────────┐     ┌───────────────┐
+//! │ TCP Clients   │────▶│               │────▶│ Client        │
+//! └───────────────┘     │   Engine      │     │ Channels      │
+//! ┌───────────────┐     │   Task        │     └───────────────┘
+//! │ UDP Clients   │────▶│               │────▶┌───────────────┐
+//! └───────────────┘     └───────────────┘     │ Multicast     │
+//!                                             └───────────────┘
+//! ```
 //!
-//! # Message Routing
+//! # Supported Protocols
+//! - CSV: Human-readable format
+//! - Binary: High-performance format (Zig/C compatible)
+//! - FIX 4.4: Institutional connectivity
 //!
-//! - **Ack/CancelAck**: Unicast to originating client only
-//! - **Trade**: Unicast to buyer + seller + multicast
-//! - **TopOfBook**: Multicast only (market data feed)
+//! # Power of Ten Compliance
+//! - Bounded channels for backpressure
+//! - Pre-allocated buffers where possible
+//! - Explicit error handling
 
+#![deny(warnings)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::must_use_candidate)]
+
+pub mod client_tcp;
+pub mod client_udp;
 pub mod config;
-pub mod types;
-pub mod server;
+pub mod engine_task;
 pub mod metrics;
-
-mod client_tcp;
-mod client_udp;
-mod engine_task;
-mod multicast;
-mod router;
-mod protocol_detect;
+pub mod multicast;
+pub mod protocol_detect;
+pub mod router;
+pub mod server;
+pub mod types;
 
 pub use config::Config;
+pub use metrics::Metrics;
 pub use server::run;
+pub use types::{ClientId, ClientRegistry, Protocol, Transport};

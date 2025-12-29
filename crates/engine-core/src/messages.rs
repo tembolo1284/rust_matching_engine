@@ -38,7 +38,7 @@ pub enum InputMessage {
 /// Offset  Size  Field
 /// ------  ----  -----
 ///   0      4    user_id
-///   4      4    user_order_id  
+///   4      4    user_order_id
 ///   8      8    symbol
 ///  16      4    price
 ///  20      4    quantity
@@ -207,6 +207,7 @@ pub struct Ack {
 const _: () = assert!(std::mem::size_of::<Ack>() == 16, "Ack must be 16 bytes");
 
 impl Ack {
+    /// Create a new order acknowledgement.
     #[inline]
     pub const fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         Ack { user_id, user_order_id, symbol }
@@ -230,6 +231,7 @@ pub struct CancelAck {
 const _: () = assert!(std::mem::size_of::<CancelAck>() == 16, "CancelAck must be 16 bytes");
 
 impl CancelAck {
+    /// Create a new cancel acknowledgement.
     #[inline]
     pub const fn new(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         CancelAck { user_id, user_order_id, symbol }
@@ -272,6 +274,12 @@ pub struct Trade {
 const _: () = assert!(std::mem::size_of::<Trade>() == 32, "Trade must be 32 bytes");
 
 impl Trade {
+    /// Create a new trade execution report.
+    ///
+    /// # Panics (debug only)
+    /// - If price is zero.
+    /// - If quantity is zero.
+    /// - If symbol is empty.
     #[inline]
     pub fn new(
         symbol: Symbol,
@@ -415,6 +423,7 @@ pub struct Reject {
 const _: () = assert!(std::mem::size_of::<Reject>() == 20, "Reject must be 20 bytes");
 
 impl Reject {
+    /// Create a new order rejection message.
     #[inline]
     pub const fn new(user_id: u32, user_order_id: u32, symbol: Symbol, reason: RejectReason) -> Self {
         Reject {
@@ -432,16 +441,19 @@ impl Reject {
 // =============================================================================
 
 impl OutputMessage {
+    /// Create an order acknowledgement message.
     #[inline]
     pub fn ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         OutputMessage::Ack(Ack::new(user_id, user_order_id, symbol))
     }
 
+    /// Create a cancel acknowledgement message.
     #[inline]
     pub fn cancel_ack(user_id: u32, user_order_id: u32, symbol: Symbol) -> Self {
         OutputMessage::CancelAck(CancelAck::new(user_id, user_order_id, symbol))
     }
 
+    /// Create a trade execution message.
     #[inline]
     pub fn trade(
         symbol: Symbol,
@@ -463,16 +475,19 @@ impl OutputMessage {
         ))
     }
 
+    /// Create an active top-of-book update message.
     #[inline]
     pub fn top_of_book(symbol: Symbol, side: Side, price: u32, total_quantity: u32) -> Self {
         OutputMessage::TopOfBook(TopOfBook::active(symbol, side, price, total_quantity))
     }
 
+    /// Create an eliminated top-of-book update message.
     #[inline]
     pub fn top_of_book_eliminated(symbol: Symbol, side: Side) -> Self {
         OutputMessage::TopOfBook(TopOfBook::eliminated(symbol, side))
     }
 
+    /// Create an order rejection message.
     #[inline]
     pub fn reject(user_id: u32, user_order_id: u32, symbol: Symbol, reason: RejectReason) -> Self {
         OutputMessage::Reject(Reject::new(user_id, user_order_id, symbol, reason))

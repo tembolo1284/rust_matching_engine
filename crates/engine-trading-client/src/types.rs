@@ -86,13 +86,26 @@ pub struct Trade {
 }
 
 /// Position in a symbol.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Position {
     pub symbol: Symbol,
     pub quantity: i64,
     pub avg_price: f64,
     pub realized_pnl: f64,
     pub unrealized_pnl: f64,
+}
+
+impl Position {
+    /// Create a new empty position for a symbol.
+    pub fn new(symbol: Symbol) -> Self {
+        Position {
+            symbol,
+            quantity: 0,
+            avg_price: 0.0,
+            realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+        }
+    }
 }
 
 /// Order book state.
@@ -221,6 +234,7 @@ pub struct LoadTestStats {
     pub orders_sent: u64,
     pub acks_received: u64,
     pub trades_received: u64,
+    pub rejects_received: u64,
     pub errors: u64,
     pub start_time: Option<std::time::Instant>,
     pub end_time: Option<std::time::Instant>,
@@ -277,6 +291,7 @@ impl LoadTestStats {
         println!("  Sent:     {:>12}", format_number(self.orders_sent));
         println!("  Acks:     {:>12}", format_number(self.acks_received));
         println!("  Trades:   {:>12}", format_number(self.trades_received));
+        println!("  Rejects:  {:>12}", format_number(self.rejects_received));
         println!("  Errors:   {:>12}", format_number(self.errors));
         println!();
         println!("Performance:");
@@ -290,6 +305,21 @@ impl LoadTestStats {
         println!("  p99.9:    {:>12} μs", self.latency_percentile(99.9));
         println!("  max:      {:>12} μs", self.latency_percentile(100.0));
         println!("══════════════════════════════════════════════════════════");
+    }
+}
+
+impl Clone for LoadTestStats {
+    fn clone(&self) -> Self {
+        Self {
+            orders_sent: self.orders_sent,
+            acks_received: self.acks_received,
+            trades_received: self.trades_received,
+            rejects_received: self.rejects_received,
+            errors: self.errors,
+            start_time: self.start_time,
+            end_time: self.end_time,
+            latency_histogram: self.latency_histogram.as_ref().map(|h| h.clone()),
+        }
     }
 }
 

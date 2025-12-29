@@ -67,7 +67,7 @@ impl PriceLevel {
     /// Total quantity at this level.
     #[inline]
     pub fn total_quantity(&self) -> u32 {
-        self.orders.iter().map(|o| o.remaining_quantity()).sum()
+        self.orders.iter().map(|o| o.remaining_qty).sum()
     }
 
     /// Check if level is empty.
@@ -88,10 +88,9 @@ impl PriceLevel {
         debug_assert_eq!(order.price, self.price, "order price must match level");
         
         if self.orders.is_full() {
-            return Err(EngineError::LevelCapacityExceeded {
+            return Err(EngineError::OrdersPerLevelExceeded {
+                symbol: order.symbol,
                 price: self.price,
-                current: self.orders.len(),
-                max: MAX_ORDERS_PER_LEVEL,
             });
         }
         
@@ -140,7 +139,6 @@ impl OrderBook {
     /// Create with specific capacity hint (for pre-allocation).
     pub fn with_capacity(symbol: Symbol, _levels_per_side: usize) -> Self {
         // ArrayVec has fixed capacity, so we ignore the hint
-        // but keep the API for compatibility
         Self::new(symbol)
     }
 
@@ -214,8 +212,16 @@ impl OrderBook {
         debug_assert_eq!(msg.symbol, self.symbol, "order symbol must match book");
         debug_assert!(msg.quantity > 0, "order with zero quantity");
 
-        // Create order
-        let mut order = Order::from_new_order(msg, timestamp);
+        // Create order using Order::new
+        let mut order = Order::new(
+            msg.user_id,
+            msg.user_order_id,
+            msg.symbol,
+            msg.price,
+            msg.quantity,
+            msg.side,
+            timestamp,
+        );
 
         // Emit Ack first
         if !outputs.is_full() {
@@ -233,7 +239,7 @@ impl OrderBook {
         self.match_order(&mut order, outputs)?;
 
         // If order has remaining quantity and is a limit order, add to book
-        if !order.is_filled() && order.is_limit() {
+        if !order.is_filled() && order.order_type.is_limit() {
             self.insert_order(order)?;
         }
 
@@ -254,27 +260,22 @@ impl OrderBook {
         let old_ask = self.best_ask_price();
 
         // Search bids
-        let mut found = false;
         for level in &mut self.bids {
             if let Some(pos) = level.orders.iter().position(|o| {
                 o.user_id == user_id && o.user_order_id == user_order_id
             }) {
                 level.orders.remove(pos);
-                found = true;
                 break;
             }
         }
 
-        // Search asks if not found in bids
-        if !found {
-            for level in &mut self.asks {
-                if let Some(pos) = level.orders.iter().position(|o| {
-                    o.user_id == user_id && o.user_order_id == user_order_id
-                }) {
-                    level.orders.remove(pos);
-                    found = true;
-                    break;
-                }
+        // Search asks
+        for level in &mut self.asks {
+            if let Some(pos) = level.orders.iter().position(|o| {
+                o.user_id == user_id && o.user_order_id == user_order_id
+            }) {
+                level.orders.remove(pos);
+                break;
             }
         }
 
@@ -356,10 +357,7 @@ impl OrderBook {
             let best_level = &mut opposite_side[0];
 
             // Check price compatibility
-            let prices_cross = match order.side {
-                Side::Buy => order.price == 0 || order.price >= best_level.price,
-                Side::Sell => order.price == 0 || order.price <= best_level.price,
-            };
+            let prices_cross = order.can_match(best_level.price);
 
             if !prices_cross {
                 break;
@@ -368,7 +366,8 @@ impl OrderBook {
             // Match against orders at this level
             while !order.is_filled() && !best_level.is_empty() {
                 let resting = &mut best_level.orders[0];
-                let match_qty = order.remaining_quantity().min(resting.remaining_quantity());
+                
+                let match_qty = order.remaining_qty.min(resting.remaining_qty);
                 let match_price = best_level.price;
 
                 // Fill both orders
@@ -411,7 +410,7 @@ impl OrderBook {
 
     fn insert_order(&mut self, order: Order) -> EngineResult<()> {
         debug_assert!(!order.is_filled(), "inserting filled order");
-        debug_assert!(order.is_limit(), "inserting non-limit order");
+        debug_assert!(order.order_type.is_limit(), "inserting non-limit order");
 
         let levels = match order.side {
             Side::Buy => &mut self.bids,
@@ -439,11 +438,9 @@ impl OrderBook {
         } else {
             // Create new level
             if levels.is_full() {
-                return Err(EngineError::BookCapacityExceeded {
+                return Err(EngineError::PriceLevelCapacityExceeded {
                     symbol: self.symbol,
                     side: order.side,
-                    current: levels.len(),
-                    max: MAX_PRICE_LEVELS,
                 });
             }
 

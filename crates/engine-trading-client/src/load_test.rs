@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use engine_core::{InputMessage, NewOrder, Side};
+use engine_core::{InputMessage, NewOrder, OutputMessage, Side};
 use rand::prelude::*;
-use tokio::sync::mpsc::{self};
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
@@ -60,8 +60,9 @@ pub async fn run_load_test(
             match event {
                 NetworkEvent::Message(msg) => {
                     match msg {
-                        engine_core::OutputMessage::Ack(_) => s.acks_received += 1,
-                        engine_core::OutputMessage::Trade(_) => s.trades_received += 1,
+                        OutputMessage::Ack(_) => s.acks_received += 1,
+                        OutputMessage::Trade(_) => s.trades_received += 1,
+                        OutputMessage::Reject(_) => s.rejects_received += 1,
                         _ => {}
                     }
                 }
@@ -83,15 +84,12 @@ pub async fn run_load_test(
     let mut rng = rand::thread_rng();
     let mut order_id: u32 = 1;
 
-    // Calculate delay between orders for throttling
     let delay = scenario.orders_per_second.map(|rate| Duration::from_nanos(1_000_000_000 / rate));
 
-    // Progress tracking
     let progress_interval = (scenario.total_orders / 10).max(1000);
     let start = Instant::now();
 
     for i in 0..scenario.total_orders {
-        // Generate random order
         let symbol = scenario.symbols.choose(&mut rng).unwrap().clone();
         let price = rng.gen_range(scenario.price_range.0..=scenario.price_range.1);
         let quantity = rng.gen_range(scenario.qty_range.0..=scenario.qty_range.1);
@@ -110,7 +108,6 @@ pub async fn run_load_test(
             side,
         ));
 
-        // Send order
         if msg_tx.send(order).await.is_err() {
             break;
         }
@@ -122,12 +119,10 @@ pub async fn run_load_test(
 
         order_id += 1;
 
-        // Throttle if needed
         if let Some(d) = delay {
             sleep(d).await;
         }
 
-        // Print progress
         if i > 0 && i % progress_interval == 0 {
             let elapsed = start.elapsed().as_secs_f64();
             let rate = i as f64 / elapsed;
@@ -142,7 +137,6 @@ pub async fn run_load_test(
         }
     }
 
-    // Wait for remaining acks (with timeout)
     println!("\n  Waiting for remaining responses...");
     sleep(Duration::from_secs(2)).await;
 
@@ -151,11 +145,9 @@ pub async fn run_load_test(
         s.end_time = Some(Instant::now());
     }
 
-    // Cleanup
     network_handle.abort();
     collector_handle.abort();
 
-    // Return stats
     let final_stats = stats.read().await.clone();
     Ok(final_stats)
 }
@@ -220,19 +212,4 @@ pub async fn interactive_menu(
     }
 
     Ok(())
-}
-
-// Re-export LoadTestStats clone for convenience
-impl Clone for LoadTestStats {
-    fn clone(&self) -> Self {
-        Self {
-            orders_sent: self.orders_sent,
-            acks_received: self.acks_received,
-            trades_received: self.trades_received,
-            errors: self.errors,
-            start_time: self.start_time,
-            end_time: self.end_time,
-            latency_histogram: self.latency_histogram.as_ref().map(|h| h.clone()),
-        }
-    }
 }

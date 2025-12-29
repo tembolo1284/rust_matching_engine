@@ -147,7 +147,8 @@ pub async fn run_udp_server(
                     data
                 };
 
-                binary_codec::decode_input(payload).ok()
+                // decode_input returns (InputMessage, usize), extract just the message
+                binary_codec::decode_input(payload).ok().map(|(msg, _)| msg)
             }
             Protocol::Fix => None, // FIX not supported over UDP
         };
