@@ -234,7 +234,7 @@ Professional terminal UI for interactive trading.
 cargo run --release -p engine-server
 
 # Terminal 2: Start trading client
-cargo run --release -p engine-trading-client -- \
+cargo run --release -p engine-trading-client --bin trading-client -- \
     --server 127.0.0.1:1234 \
     --user-id 1 \
     --symbol IBM
