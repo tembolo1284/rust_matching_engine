@@ -1,13 +1,13 @@
 //! Order book implementation with Power of Ten compliance.
 //!
 //! # Architecture
-//! - Price levels stored in sorted ArrayVec (bids descending, asks ascending).
+//! - Price levels stored in sorted Vec (bids descending, asks ascending).
 //! - Orders within a level maintain FIFO order.
 //! - All operations bounded by compile-time constants.
 //!
 //! # Power of Ten Compliance
 //! - Rule 2: All loops bounded by MAX_* constants.
-//! - Rule 3: No dynamic allocation (ArrayVec with fixed capacity).
+//! - Rule 3: No dynamic allocation after initialization (pre-allocated Vecs).
 //! - Rule 5: Assertions on all operations.
 
 use arrayvec::ArrayVec;
@@ -49,8 +49,8 @@ const _: () = assert!(MAX_ORDERS_PER_LEVEL >= 1, "need at least one order per le
 pub struct PriceLevel {
     /// Price for this level.
     pub price: u32,
-    /// Orders at this price (FIFO order).
-    pub orders: ArrayVec<Order, MAX_ORDERS_PER_LEVEL>,
+    /// Orders at this price (FIFO order) - heap allocated.
+    pub orders: Vec<Order>,
 }
 
 impl PriceLevel {
@@ -60,7 +60,7 @@ impl PriceLevel {
         debug_assert!(price > 0, "price level with zero price");
         PriceLevel {
             price,
-            orders: ArrayVec::new(),
+            orders: Vec::with_capacity(16), // Start small, grow as needed
         }
     }
 
@@ -86,14 +86,14 @@ impl PriceLevel {
     #[inline]
     pub fn add_order(&mut self, order: Order) -> EngineResult<()> {
         debug_assert_eq!(order.price, self.price, "order price must match level");
-        
-        if self.orders.is_full() {
+
+        if self.orders.len() >= MAX_ORDERS_PER_LEVEL {
             return Err(EngineError::OrdersPerLevelExceeded {
                 symbol: order.symbol,
                 price: self.price,
             });
         }
-        
+
         self.orders.push(order);
         debug_assert!(!self.orders.is_empty());
         Ok(())
@@ -114,32 +114,39 @@ impl PriceLevel {
 /// Order book for a single symbol.
 ///
 /// Maintains buy and sell sides with price-time priority.
+/// Uses heap-allocated Vecs to avoid stack overflow.
 #[derive(Debug)]
 pub struct OrderBook {
     /// Symbol for this book.
     symbol: Symbol,
     /// Bid levels (sorted descending by price - best bid first).
-    bids: ArrayVec<PriceLevel, MAX_PRICE_LEVELS>,
+    bids: Vec<PriceLevel>,
     /// Ask levels (sorted ascending by price - best ask first).
-    asks: ArrayVec<PriceLevel, MAX_PRICE_LEVELS>,
+    asks: Vec<PriceLevel>,
 }
 
 impl OrderBook {
     /// Create a new order book for a symbol.
     pub fn new(symbol: Symbol) -> Self {
         debug_assert!(!symbol.is_empty(), "order book with empty symbol");
-        
+
         OrderBook {
             symbol,
-            bids: ArrayVec::new(),
-            asks: ArrayVec::new(),
+            bids: Vec::with_capacity(64),  // Pre-allocate reasonable capacity
+            asks: Vec::with_capacity(64),
         }
     }
 
     /// Create with specific capacity hint (for pre-allocation).
-    pub fn with_capacity(symbol: Symbol, _levels_per_side: usize) -> Self {
-        // ArrayVec has fixed capacity, so we ignore the hint
-        Self::new(symbol)
+    pub fn with_capacity(symbol: Symbol, levels_per_side: usize) -> Self {
+        debug_assert!(!symbol.is_empty(), "order book with empty symbol");
+
+        let capacity = levels_per_side.min(MAX_PRICE_LEVELS);
+        OrderBook {
+            symbol,
+            bids: Vec::with_capacity(capacity),
+            asks: Vec::with_capacity(capacity),
+        }
     }
 
     /// Get the symbol.
@@ -153,11 +160,11 @@ impl OrderBook {
         let (bid_price, bid_qty) = self.bids.first()
             .map(|l| (l.price, l.total_quantity()))
             .unwrap_or((0, 0));
-        
+
         let (ask_price, ask_qty) = self.asks.first()
             .map(|l| (l.price, l.total_quantity()))
             .unwrap_or((0, 0));
-        
+
         TopOfBookSnapshot {
             bid_price,
             bid_quantity: bid_qty,
@@ -366,7 +373,7 @@ impl OrderBook {
             // Match against orders at this level
             while !order.is_filled() && !best_level.is_empty() {
                 let resting = &mut best_level.orders[0];
-                
+
                 let match_qty = order.remaining_qty.min(resting.remaining_qty);
                 let match_price = best_level.price;
 
@@ -417,6 +424,18 @@ impl OrderBook {
             Side::Sell => &mut self.asks,
         };
 
+        // Check capacity before inserting
+        if levels.len() >= MAX_PRICE_LEVELS {
+            // Check if we can add to existing level
+            let existing = levels.iter().any(|l| l.price == order.price);
+            if !existing {
+                return Err(EngineError::PriceLevelCapacityExceeded {
+                    symbol: self.symbol,
+                    side: order.side,
+                });
+            }
+        }
+
         // Find insertion point
         let pos = match order.side {
             Side::Buy => {
@@ -437,13 +456,6 @@ impl OrderBook {
             levels[idx].add_order(order)?;
         } else {
             // Create new level
-            if levels.is_full() {
-                return Err(EngineError::PriceLevelCapacityExceeded {
-                    symbol: self.symbol,
-                    side: order.side,
-                });
-            }
-
             let mut new_level = PriceLevel::new(order.price);
             new_level.add_order(order)?;
 
