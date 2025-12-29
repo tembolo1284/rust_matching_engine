@@ -25,9 +25,11 @@ rustc-hash = "1.1"
 
 # Socket options for multicast
 socket2 = { version = "0.5", features = ["all"] }
+arrayvec = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"
+arrayvec = "0.7"
 
 [[bin]]
 name = "engine-server"

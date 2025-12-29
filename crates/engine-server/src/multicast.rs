@@ -49,6 +49,7 @@ pub async fn run_multicast_publisher(
     // Convert to tokio socket
     socket.set_nonblocking(true)?;
     let socket = UdpSocket::from_std(socket.into())?;
+
     let mcast_addr = SocketAddrV4::new(config.multicast_group, config.multicast_port);
 
     eprintln!(
@@ -97,7 +98,7 @@ pub async fn run_multicast_publisher(
             }
             Err(e) => {
                 eprintln!("Multicast send error: {}", e);
-                metrics.record_send_error();
+                Metrics::inc(&metrics.send_errors);  // Fixed: was metrics.record_send_error()
             }
         }
     }

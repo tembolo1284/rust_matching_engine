@@ -437,6 +437,7 @@ dependencies = [
 name = "engine-server"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "engine-core",
  "engine-protocol",
  "rustc-hash",
