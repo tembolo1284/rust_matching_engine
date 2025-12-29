@@ -496,10 +496,9 @@ impl App {
 
                 book.last_update = Some(Local::now());
             }
-            // NEW: Handle Reject messages
             OutputMessage::Reject(reject) => {
                 self.reject_count += 1;
-                
+
                 if reject.user_id == self.user_id {
                     if let Some(order) = self.my_orders.get_mut(&reject.user_order_id) {
                         order.status = OrderStatus::Rejected;
@@ -514,7 +513,6 @@ impl App {
     }
 
     fn update_position(&mut self, symbol: Symbol, qty_delta: i64, price: u32) {
-        // FIXED: Use Position::new() instead of Default
         let pos = self.positions.entry(symbol).or_insert_with(|| Position::new(symbol));
 
         let old_qty = pos.quantity;
@@ -523,10 +521,8 @@ impl App {
         // Simple average price calculation
         if (old_qty >= 0 && qty_delta > 0) || (old_qty <= 0 && qty_delta < 0) {
             // Adding to position
-            if pos.quantity != 0 {
-                let total_cost = pos.avg_price * old_qty.abs() as f64 + price as f64 * qty_delta.abs() as f64;
-                pos.avg_price = total_cost / pos.quantity.abs() as f64;
-            }
+            let total_cost = pos.avg_price * old_qty.abs() as f64 + price as f64 * qty_delta.abs() as f64;
+            pos.avg_price = total_cost / pos.quantity.abs() as f64;
         } else {
             // Reducing position - realize P&L
             let realized = (price as f64 - pos.avg_price) * qty_delta.abs().min(old_qty.abs()) as f64;

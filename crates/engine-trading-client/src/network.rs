@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use bytes::BytesMut;
-use engine_core::{InputMessage, OutputMessage, RejectReason, Symbol};
+use engine_core::{InputMessage, OutputMessage, Symbol};
 use engine_protocol::{binary_codec, fix_codec};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UdpSocket};
@@ -193,12 +193,6 @@ impl EngineConnection {
                                 }
                             }
 
-                            // Also remove from pending if rejected
-                            if let OutputMessage::Reject(ref reject) = msg {
-                                let mut pending = self.pending_orders.write().await;
-                                pending.remove(&reject.user_order_id);
-                            }
-
                             let _ = self.event_tx.send(NetworkEvent::Message(msg)).await;
                         }
                         Ok(None) => {
@@ -233,7 +227,7 @@ impl EngineConnection {
                 if n == 0 {
                     return Ok(None);
                 }
-                // Parse CSV
+                // Parse CSV - we need to handle output format
                 Ok(parse_output_csv(&line))
             }
             Protocol::Binary => {
@@ -246,7 +240,7 @@ impl EngineConnection {
                 let mut frame = vec![0u8; len];
                 stream.read_exact(&mut frame).await?;
 
-                // FIXED: decode_output now returns (msg, bytes_consumed)
+                // decode_output returns (OutputMessage, usize), extract just the message
                 let (msg, _) = binary_codec::decode_output(&frame)?;
                 Ok(Some(msg))
             }
@@ -254,11 +248,11 @@ impl EngineConnection {
                 // Read FIX message (simplified)
                 let mut buf = Vec::with_capacity(4096);
                 let mut temp = [0u8; 1];
-                
+
                 loop {
                     stream.read_exact(&mut temp).await?;
                     buf.push(temp[0]);
-                    
+
                     // Check for complete message (ends with 10=XXX|)
                     if buf.len() >= 7 && buf.ends_with(&[0x01]) {
                         if let Some(pos) = buf.windows(3).rposition(|w| w == b"10=") {
@@ -267,7 +261,7 @@ impl EngineConnection {
                             }
                         }
                     }
-                    
+
                     if buf.len() > 8192 {
                         return Err(anyhow!("FIX message too large"));
                     }
@@ -298,18 +292,12 @@ impl EngineConnection {
             }
             Protocol::Binary => {
                 // Skip length prefix if present
-                let frame = if data.len() > 4 {
-                    // Check if first 4 bytes look like a length prefix
-                    let potential_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-                    if potential_len > 0 && potential_len < 100 && potential_len == data.len() - 4 {
-                        &data[4..]
-                    } else {
-                        data
-                    }
+                let frame = if data.len() > 4 && &data[4..8] == b"MENG" {
+                    &data[4..]
                 } else {
                     data
                 };
-                // FIXED: decode_output now returns (msg, bytes_consumed)
+                // decode_output returns (OutputMessage, usize), extract just the message
                 let (msg, _) = binary_codec::decode_output(frame)?;
                 Ok(Some(msg))
             }
@@ -322,13 +310,13 @@ impl EngineConnection {
     async fn handle_disconnect(&mut self) {
         warn!("Disconnected from server");
         let _ = self.event_tx.send(NetworkEvent::Disconnected).await;
-        
+
         self.tcp_stream = None;
         self.udp_socket = None;
 
         // Attempt reconnection
         tokio::time::sleep(Duration::from_secs(1)).await;
-        
+
         if let Err(e) = self.connect().await {
             error!("Reconnection failed: {}", e);
         }
@@ -391,7 +379,7 @@ fn parse_output_csv(line: &str) -> Option<OutputMessage> {
             };
             Some(OutputMessage::cancel_ack(user_id, user_order_id, symbol))
         }
-        "T" if parts.len() >= 8 => {
+        "T" if parts.len() >= 7 => {
             // T, symbol, buy_uid, buy_oid, sell_uid, sell_oid, price, qty
             let symbol = Symbol::from_str(parts[1]);
             let user_id_buy: u32 = parts[2].parse().ok()?;
@@ -418,31 +406,14 @@ fn parse_output_csv(line: &str) -> Option<OutputMessage> {
                 "S" => engine_core::Side::Sell,
                 _ => return None,
             };
-            
+
             if parts[3] == "-" {
                 Some(OutputMessage::top_of_book_eliminated(symbol, side))
             } else {
                 let price: u32 = parts[3].parse().ok()?;
-                let qty: u32 = parts.get(4)?.parse().ok()?;
+                let qty: u32 = parts[4].parse().ok()?;
                 Some(OutputMessage::top_of_book(symbol, side, price, qty))
             }
-        }
-        // NEW: Handle Reject messages
-        "R" if parts.len() >= 4 => {
-            let user_id: u32 = parts[1].parse().ok()?;
-            let user_order_id: u32 = parts[2].parse().ok()?;
-            let symbol = Symbol::from_str(parts[3]);
-            let reason = if parts.len() >= 5 {
-                match parts[4] {
-                    "UnknownSymbol" => RejectReason::UnknownSymbol,
-                    "CapacityExceeded" => RejectReason::CapacityExceeded,
-                    "DuplicateOrderId" => RejectReason::DuplicateOrderId,
-                    _ => RejectReason::InvalidOrder,
-                }
-            } else {
-                RejectReason::InvalidOrder
-            };
-            Some(OutputMessage::reject(user_id, user_order_id, symbol, reason))
         }
         _ => None,
     }
