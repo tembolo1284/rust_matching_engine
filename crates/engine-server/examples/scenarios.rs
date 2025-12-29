@@ -56,12 +56,13 @@ struct ResponseStats {
     cancel_acks: u64,
     trades: u64,
     top_of_book: u64,
+    rejects: u64,
     parse_errors: u64,
 }
 
 impl ResponseStats {
     fn total(&self) -> u64 {
-        self.acks + self.cancel_acks + self.trades + self.top_of_book
+        self.acks + self.cancel_acks + self.trades + self.top_of_book + self.rejects
     }
 
     fn add(&mut self, other: &ResponseStats) {
@@ -69,6 +70,7 @@ impl ResponseStats {
         self.cancel_acks += other.cancel_acks;
         self.trades += other.trades;
         self.top_of_book += other.top_of_book;
+        self.rejects += other.rejects;
         self.parse_errors += other.parse_errors;
     }
 
@@ -80,6 +82,9 @@ impl ResponseStats {
         }
         if self.trades > 0 {
             eprintln!("Trades:          {}", self.trades);
+        }
+        if self.rejects > 0 {
+            eprintln!("Rejects:         {}", self.rejects);
         }
         eprintln!("Top of Book:     {}", self.top_of_book);
         if self.parse_errors > 0 {
@@ -296,7 +301,8 @@ impl Client {
         }
 
         self.stream.read_exact(&mut self.read_buf[..frame_len]).await?;
-        let msg = self.decoder.decode_output(&self.read_buf[..frame_len])?;
+        // decode_output returns (OutputMessage, usize), extract just the message
+        let (msg, _) = self.decoder.decode_output(&self.read_buf[..frame_len])?;
         Ok(msg)
     }
 
@@ -330,6 +336,7 @@ fn count_message(stats: &mut ResponseStats, msg: &OutputMessage) {
         OutputMessage::CancelAck(_) => stats.cancel_acks += 1,
         OutputMessage::Trade(_) => stats.trades += 1,
         OutputMessage::TopOfBook(_) => stats.top_of_book += 1,
+        OutputMessage::Reject(_) => stats.rejects += 1,
     }
 }
 
@@ -402,6 +409,20 @@ fn parse_csv_output(line: &str) -> Result<OutputMessage, Box<dyn Error>> {
                     symbol, side, price, qty,
                 )))
             }
+        }
+        "R" => {
+            // R, user_id, order_id, symbol, reason (Reject)
+            if parts.len() < 4 {
+                return Err("Invalid Reject".into());
+            }
+            let user_id: u32 = parts[1].parse()?;
+            let order_id: u32 = parts[2].parse()?;
+            let symbol = engine_core::Symbol::from_str(parts[3]);
+            // Default to InvalidOrder if reason not parseable
+            let reason = engine_core::RejectReason::InvalidOrder;
+            Ok(OutputMessage::Reject(engine_core::Reject::new(
+                user_id, order_id, symbol, reason,
+            )))
         }
         _ => Err(format!("Unknown message type: {}", parts[0]).into()),
     }
@@ -515,7 +536,7 @@ async fn run_scenario_3(client: &mut Client) -> Result<(), Box<dyn Error>> {
 async fn recv_and_print(client: &mut Client) {
     // Give server time to process and respond
     tokio::time::sleep(Duration::from_millis(50)).await;
-    
+
     for _ in 0..50 {
         if let Some(msg) = client.try_recv().await {
             print_message(&msg);
@@ -565,6 +586,12 @@ fn print_message(msg: &OutputMessage) {
                     tob.symbol, side_char, tob.price, tob.total_quantity
                 );
             }
+        }
+        OutputMessage::Reject(r) => {
+            eprintln!(
+                "[RECV] R, {}, {}, {}, {:?}",
+                r.symbol, r.user_id, r.user_order_id, r.reason
+            );
         }
     }
 }
@@ -953,4 +980,3 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut client = Client::connect(&config).await?;
     run_scenario(&mut client, scenario, config.quiet).await
 }
-

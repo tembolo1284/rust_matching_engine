@@ -42,10 +42,10 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         EngineConfig {
-            max_symbols: 1024,
-            max_orders: 1_000_000,
-            levels_per_side: 256,
-            strict_mode: true, // Power of Ten compliant by default
+            max_symbols: 256,
+            max_orders: 100_000,
+            levels_per_side: 128,
+            strict_mode: false,
         }
     }
 }
@@ -68,6 +68,26 @@ impl EngineConfig {
             ..Default::default()
         }
     }
+
+    /// Create a small footprint config for resource-constrained environments.
+    pub fn small() -> Self {
+        EngineConfig {
+            max_symbols: 64,
+            max_orders: 10_000,
+            levels_per_side: 64,
+            strict_mode: false,
+        }
+    }
+
+    /// Create a production config with reasonable defaults.
+    pub fn production() -> Self {
+        EngineConfig {
+            max_symbols: 256,
+            max_orders: 100_000,
+            levels_per_side: 128,
+            strict_mode: false,
+        }
+    }
 }
 
 // =============================================================================
@@ -84,12 +104,13 @@ pub const UNKNOWN_SYMBOL: Symbol = Symbol([b'<', b'U', b'N', b'K', b'>', 0, 0, 0
 /// Multi-symbol matching engine.
 ///
 /// # Memory Model
-/// All memory is pre-allocated at construction:
-/// - Order books: `FxHashMap<Symbol, OrderBook>` with reserved capacity.
-/// - Order tracking: `FxHashMap<(u32, u32), Symbol>` with reserved capacity.
+/// Initial allocation is bounded to reasonable defaults. The engine will
+/// grow as needed up to the configured maximums, but rejects operations
+/// that would exceed capacity.
 ///
-/// After `new()` or `with_config()`, no further heap allocation occurs
-/// during normal operation (assuming capacities are not exceeded).
+/// After initialization, allocations only occur when:
+/// - New symbols are registered (up to max_symbols)
+/// - New orders are tracked (up to max_orders)
 #[derive(Debug)]
 pub struct MatchingEngine {
     /// Symbol -> OrderBook.
@@ -120,23 +141,23 @@ impl MatchingEngine {
         debug_assert!(config.max_orders > 0, "max_orders must be > 0");
         debug_assert!(config.levels_per_side > 0, "levels_per_side must be > 0");
 
+        // Start with reasonable initial capacity, grow as needed
+        // This prevents massive upfront allocation while still allowing growth
+        let initial_symbol_capacity = config.max_symbols.min(64);
+        let initial_order_capacity = config.max_orders.min(10_000);
+
         let mut order_books = FxHashMap::default();
-        order_books.reserve(config.max_symbols);
+        order_books.reserve(initial_symbol_capacity);
 
         let mut order_to_symbol = FxHashMap::default();
-        order_to_symbol.reserve(config.max_orders);
+        order_to_symbol.reserve(initial_order_capacity);
 
-        let engine = MatchingEngine {
+        MatchingEngine {
             order_books,
             order_to_symbol,
             config,
             timestamp_counter: 0,
-        };
-
-        debug_assert!(engine.order_books.capacity() >= engine.config.max_symbols);
-        debug_assert!(engine.order_to_symbol.capacity() >= engine.config.max_orders);
-
-        engine
+        }
     }
 
     /// Get the configuration.
@@ -522,7 +543,7 @@ mod tests {
         let mut outputs = new_outputs();
 
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EngineError::UnknownSymbol(_)));
         assert!(outputs.iter().any(|m| m.is_reject()));
@@ -535,7 +556,7 @@ mod tests {
 
         let mut outputs = new_outputs();
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-        
+
         assert!(result.is_ok());
         assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 100);
     }
@@ -546,7 +567,7 @@ mod tests {
         let mut outputs = new_outputs();
 
         let result = engine.process_message(new_order(1, 1, "IBM", 100, 10, Side::Buy), &mut outputs);
-        
+
         assert!(result.is_ok());
         assert!(engine.is_registered(sym("IBM")));
     }
@@ -573,7 +594,7 @@ mod tests {
         assert_eq!(engine.num_orders(), 1);
 
         let outputs = engine.process(cancel(1, 1)).unwrap();
-        
+
         assert!(outputs.iter().any(|m| matches!(m, OutputMessage::CancelAck(_))));
         assert_eq!(engine.top_of_book(sym("IBM")).bid_price, 0);
         assert_eq!(engine.num_orders(), 0);
@@ -586,7 +607,7 @@ mod tests {
 
         engine.process(new_order(1, 1, "IBM", 100, 10, Side::Buy)).unwrap();
         let result = engine.process(new_order(1, 1, "IBM", 101, 20, Side::Buy));
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EngineError::DuplicateOrderId { .. }));
     }
